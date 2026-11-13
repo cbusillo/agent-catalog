@@ -1,4 +1,5 @@
 import fcntl
+import io
 import json
 import os
 import shutil
@@ -25,9 +26,13 @@ INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
 PROOF_PROJECT = INSPECTOR_HOME / "proofs"
 PROFILE_TEMPLATE = PACKAGE / "profile.xml"
+PROOF_SOURCES = PACKAGE / "proofs"
 ANALYZED_LINE_PREFIX = "Analyzing code in …/"
 RESULTS_INDEX = ".descriptions.json"
 DEFAULT_INTERPRETER_NAME = "inspect-python"
+POSTGRESQL_DIALECT = (
+    '<project version="4"><component name="SqlDialectMappings"><file url="PROJECT" dialect="PostgreSQL" /></component></project>\n'
+)
 MARKETPLACE_DOWNLOAD = "https://plugins.jetbrains.com/plugin/download"
 PLUGINS = {
     "io.github.mwassong.mapper-guard": "0.1.7",
@@ -121,12 +126,8 @@ def repository_files(repository: Path) -> list[str]:
     return sorted(file for file in result.stdout.splitlines() if (repository / file).is_file())
 
 
-def proof_project_files() -> list[str]:
-    return sorted(
-        file.relative_to(PROOF_PROJECT).as_posix()
-        for file in PROOF_PROJECT.rglob("*")
-        if file.is_file() and ".idea" not in file.relative_to(PROOF_PROJECT).parts
-    )
+def planted_files() -> list[str]:
+    return sorted(file.relative_to(PROOF_SOURCES).as_posix() for file in PROOF_SOURCES.rglob("*") if file.is_file())
 
 
 def require_inspector_installed() -> None:
@@ -174,9 +175,8 @@ def install_plugins_into_new_home() -> None:
     for plugin, version in PLUGINS.items():
         url = f"{MARKETPLACE_DOWNLOAD}?{urlencode({'pluginId': plugin, 'version': version})}"
         try:
-            with urllib.request.urlopen(url) as response, tempfile.TemporaryFile() as archive:  # noqa: S310 a fixed https URL
-                shutil.copyfileobj(response, archive)
-                zipfile.ZipFile(archive).extractall(partial)
+            with urllib.request.urlopen(url) as response:  # noqa: S310 a fixed https URL
+                zipfile.ZipFile(io.BytesIO(response.read())).extractall(partial)
         except (OSError, zipfile.BadZipFile) as error:
             raise InspectionUnknownError(f"Could not install the PyCharm plugin {plugin} {version} from {url}: {error}") from error
     partial.rename(INSPECTOR_PLUGINS)
@@ -188,11 +188,12 @@ def prepare_inspection(repository: Path) -> tuple[Path, Path]:
         install_plugins_into_new_home()
         interpreter = read_interpreter(repository)
         shutil.rmtree(PROOF_PROJECT, ignore_errors=True)
-        shutil.copytree(PACKAGE / "proofs", PROOF_PROJECT)
+        shutil.copytree(PROOF_SOURCES, PROOF_PROJECT)
         trust_projects((repository, PROOF_PROJECT))
         names = {project_interpreter_name(repository), project_interpreter_name(PROOF_PROJECT)}
         register_interpreter(names, interpreter)
         set_sql_dialect_if_unset(repository)
+        set_sql_dialect_if_unset(PROOF_PROJECT)
         return write_run_settings(interpreter.version)
     except (OSError, ElementTree.ParseError) as error:
         raise InspectionUnknownError(f"Could not prepare PyCharm to inspect {repository}: {error}") from error
@@ -259,7 +260,8 @@ def project_interpreter_name(project: Path) -> str:
 def set_sql_dialect_if_unset(project: Path) -> None:
     dialects = project / ".idea" / "sqldialects.xml"
     if not dialects.exists():
-        shutil.copyfile(PACKAGE / "proofs" / ".idea" / "sqldialects.xml", dialects)
+        dialects.parent.mkdir(exist_ok=True)
+        dialects.write_text(POSTGRESQL_DIALECT)
 
 
 def run_inspector(project: Path, expected: list[str], profile: Path, properties: Path) -> list[Finding]:
@@ -276,7 +278,7 @@ def run_inspector(project: Path, expected: list[str], profile: Path, properties:
 
 
 def is_planted(file: Path) -> bool:
-    return file.resolve().is_relative_to(PACKAGE / "proofs")
+    return file.resolve().is_relative_to(PROOF_SOURCES)
 
 
 def require_proofs_caught(findings: list[Finding]) -> None:
@@ -294,7 +296,7 @@ def inspect_repository(repository: Path) -> list[Finding]:
     require_inspector_installed()
     with exclusive_inspector_home():
         profile, properties = prepare_inspection(repository)
-        require_proofs_caught(run_inspector(PROOF_PROJECT, proof_project_files(), profile, properties))
+        require_proofs_caught(run_inspector(PROOF_PROJECT, planted_files(), profile, properties))
         files = repository_files(repository)
         findings = run_inspector(repository, files, profile, properties)
         return [finding for finding in findings if finding.file in files and not is_planted(repository / finding.file)]

@@ -8,7 +8,7 @@ import pytest
 
 from python_inspection import inspection
 from python_inspection.inspection import (
-    PACKAGE,
+    PROOF_SOURCES,
     PROOFS,
     Finding,
     InspectionUnknownError,
@@ -61,7 +61,7 @@ def test_a_file_the_inspector_skipped_is_reported() -> None:
 
 def test_every_proof_names_a_planted_file_and_line() -> None:
     for file, line, _ in PROOFS.values():
-        assert len((PACKAGE / "proofs" / file).read_text().splitlines()) >= line
+        assert len((PROOF_SOURCES / file).read_text().splitlines()) >= line
 
 
 def test_every_proof_caught_as_pycharm_reports_it_passes(tmp_path: Path) -> None:
@@ -148,8 +148,8 @@ def test_a_failed_plugin_download_leaves_no_plugins_folder_behind(tmp_path: Path
 
 
 def test_planted_proofs_in_this_checkout_stay_out_of_its_own_findings() -> None:
-    assert inspection.is_planted(PACKAGE / "proofs" / "canary.py")
-    assert not inspection.is_planted(PACKAGE / "inspection.py")
+    assert inspection.is_planted(PROOF_SOURCES / "canary.py")
+    assert not inspection.is_planted(PROOF_SOURCES.parent / "inspection.py")
 
 
 def test_existing_project_settings_keep_their_interpreter_and_other_settings(tmp_path: Path) -> None:
