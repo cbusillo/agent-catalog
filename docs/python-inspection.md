@@ -11,7 +11,7 @@ uvx --from git+https://github.com/<owner>/agent-catalog@v0.1.0 inspect-python
 ## Settings
 
 - `INSPECT_PYTHON_PYCHARM`: the PyCharm application. Default `~/Applications/PyCharm.app`.
-- `INSPECT_PYTHON_HOME`: the folder PyCharm uses as its home while inspecting. Default `~/.cache/inspect-python`.
+- `INSPECT_PYTHON_HOME`: the folder PyCharm uses as its home while inspecting. Default `~/.cache/inspect-python`. It must not be inside the repository or contain it; the tool refuses with `UNKNOWN`.
 
 The repository must have its interpreter at `.venv/bin/python`, as `uv sync` leaves it.
 
@@ -36,3 +36,11 @@ Measured on PyCharm 2026.3, build PY-263.7307.206:
 - The GitHub workflow, compose, Markdown and `.env` checks also report files in a subfolder, such as `inspect-python-planted-mistakes/.github/workflows/proof.yml`.
 - PyCharm's own command-line plugin installer cannot install a plugin that has no version for this build, so the tool unpacks Marketplace zips itself.
 - The GitHub workflow check downloads an action's description from GitHub the first time. It has not been tested offline.
+
+## Known and not fixed
+
+- **The proofs do not prove every check finished every file.** The planted mistakes prove each check is installed, switched on and fires in this launch. An inspection that fails on one real file gives no finding for it, and the run can still answer `clean`. Comes back if a clean answer is ever traced to that.
+- **A separately installed copy shows this catalog's planted files as findings.** Findings in this checkout's `src/python_inspection/proofs` are dropped only when the running package is that same checkout. Inspecting the catalog through another installed copy reports them. Comes back when the catalog is inspected that way for real work.
+- **A repository can weaken the standard-library proof.** A repository file named like a standard-library module could resolve the canary's import in its place. This is inference, not seen. Comes back if a repository with such a file answers `clean` while the canary passes.
+- **Duplicate analysis can report repository code that matches planted code.** The planted duplicate files sit in the same project as the repository, so a repository file that matches them could be reported as a duplicate. This is inference, not seen. Comes back if such a finding appears.
+- **Five changes leave the unit tests passing:** matching a proof without its inspection ID, removing the BetterPy proof, disconnecting the file-coverage check, skipping project trust, and exiting 1 on a clean answer. Comes back when one of them is made by mistake, or when the tests are next reworked.

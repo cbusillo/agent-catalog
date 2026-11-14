@@ -243,6 +243,34 @@ def test_an_inspector_that_never_finishes_answers_unknown(tmp_path: Path, monkey
         inspection.inspect_repository(repository)
 
 
+def test_a_repository_inside_the_tool_home_is_refused_and_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(inspection.INSPECTOR_HOME / "project", {"uncommitted.py": "x = 1\n"})
+    monkeypatch.setattr(inspection, "INSPECTED_PROJECT", repository)
+
+    with pytest.raises(InspectionUnknownError, match="inside one another"):
+        inspection.inspect_repository(repository)
+    assert (repository / "uncommitted.py").read_text() == "x = 1\n"
+
+
+def test_a_tool_home_inside_the_repository_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    monkeypatch.setattr(inspection, "INSPECTOR_HOME", repository / "home")
+
+    with pytest.raises(InspectionUnknownError, match="inside one another"):
+        inspection.inspect_repository(repository)
+    assert not (repository / "home").exists()
+
+
+def test_a_report_that_is_not_json_answers_unknown_naming_it(tmp_path: Path) -> None:
+    write_pycharm_results(tmp_path, [])
+    (tmp_path / "Broken.json").write_text("{ not json")
+
+    with pytest.raises(InspectionUnknownError, match=r"Broken\.json"):
+        read_findings(tmp_path)
+
+
 def test_a_file_the_inspector_skipped_is_reported() -> None:
     inspector_log = "Analyzing code in …/src/seen.py\n"
 

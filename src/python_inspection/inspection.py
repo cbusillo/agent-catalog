@@ -96,7 +96,13 @@ def read_findings(output: Path) -> list[Finding]:
     for report in sorted(output.glob("*.json")):
         if report.name == RESULTS_INDEX or report.name.endswith("_aggregate.json"):
             continue
-        findings.extend(
+        findings.extend(read_report(report))
+    return findings
+
+
+def read_report(report: Path) -> list[Finding]:
+    try:
+        return [
             Finding(
                 file=problem.get("file", "").removeprefix("file://$PROJECT_DIR$/"),
                 line=problem.get("line", 0),
@@ -104,8 +110,9 @@ def read_findings(output: Path) -> list[Finding]:
                 description=problem["description"],
             )
             for problem in json.loads(report.read_text())["problems"]
-        )
-    return findings
+        ]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise InspectionUnknownError(f"PyCharm wrote a report this tool cannot read, {report.name}: {error!r}") from error
 
 
 def require_inspections_listed(index: Path) -> None:
@@ -157,6 +164,15 @@ def repository_files(repository: Path) -> list[str]:
 
 def planted_files() -> list[str]:
     return sorted(file.relative_to(PROOF_SOURCES).as_posix() for file in PROOF_SOURCES.rglob("*") if file.is_file())
+
+
+def require_home_apart_from(repository: Path) -> None:
+    home, checkout = INSPECTOR_HOME.resolve(), repository.resolve()
+    if home.is_relative_to(checkout) or checkout.is_relative_to(home):
+        raise InspectionUnknownError(
+            f"PyCharm's inspection home {home} and the repository {checkout} are inside one another, so the tool's copy "
+            "could overwrite the repository or land in it. Set INSPECT_PYTHON_HOME to a folder outside the repository."
+        )
 
 
 def require_inspector_installed() -> None:
@@ -357,6 +373,7 @@ def is_repository_finding(finding: Finding, repository: Path) -> bool:
 
 
 def inspect_repository(repository: Path) -> list[Finding]:
+    require_home_apart_from(repository)
     require_inspector_installed()
     interpreter = read_interpreter(repository)
     files = repository_files(repository)
