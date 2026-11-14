@@ -1,6 +1,4 @@
-import argparse
 import fcntl
-import hashlib
 import io
 import json
 import os
@@ -22,17 +20,15 @@ PACKAGE = Path(__file__).resolve().parent
 PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM", Path.home() / "Applications" / "PyCharm.app"))
 INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python"))
 INSPECTOR = PYCHARM / "Contents" / "bin" / "inspect.sh"
-PRODUCT_INFO = PYCHARM / "Contents" / "Resources" / "product-info.json"
 TYPESHED_STDLIB = PYCHARM / "Contents" / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 INSPECTOR_PLUGINS = INSPECTOR_HOME / "plugins"
 INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
-PROOF_PROJECT = INSPECTOR_HOME / "proofs"
-REPOSITORY_PROJECT = INSPECTOR_HOME / "repository"
-SETUP_RECORD = INSPECTOR_HOME / "proven.json"
+INSPECTED_PROJECT = INSPECTOR_HOME / "project"
 INSPECTOR_TIMEOUT_SECONDS = 900
 PROFILE_TEMPLATE = PACKAGE / "profile.xml"
 PROOF_SOURCES = PACKAGE / "proofs"
+PLANTED_FOLDER = "inspect-python-planted-mistakes"
 ANALYZED_LINE_PREFIX = "Analyzing code in …/"
 RESULTS_INDEX = ".descriptions.json"
 DEFAULT_INTERPRETER_NAME = "inspect-python"
@@ -164,7 +160,7 @@ def planted_files() -> list[str]:
 
 
 def require_inspector_installed() -> None:
-    for required in (INSPECTOR, TYPESHED_STDLIB, PRODUCT_INFO):
+    for required in (INSPECTOR, TYPESHED_STDLIB):
         if not required.exists():
             raise InspectionUnknownError(
                 f"PyCharm 2026.3 is not where this tool looks for it: {required} is missing. "
@@ -216,45 +212,39 @@ def install_plugins_into_new_home() -> None:
     partial.rename(INSPECTOR_PLUGINS)
 
 
-def setup_fingerprint(python_version: str) -> dict[str, str | list[str]]:
-    tool_files = sorted(file for file in PACKAGE.rglob("*") if file.is_file() and "__pycache__" not in file.parts)
-    return {
-        "PyCharm build": hashlib.sha256(PRODUCT_INFO.read_bytes()).hexdigest(),
-        "installed plugins": sorted(plugin.name for plugin in INSPECTOR_PLUGINS.iterdir()),
-        "profile": hashlib.sha256(render_profile(python_version).encode()).hexdigest(),
-        "shellcheck on the PATH": shutil.which("shellcheck") or "",
-        "this tool": hashlib.sha256(b"".join(file.read_bytes() for file in tool_files)).hexdigest(),
-    }
+def planted_paths() -> list[str]:
+    return [f"{PLANTED_FOLDER}/{file}" for file in planted_files()]
 
 
-def read_proven() -> dict[str, str | list[str]] | None:
+def require_planted_folder_free(files: list[str]) -> None:
+    if any(file.startswith(f"{PLANTED_FOLDER}/") for file in files):
+        raise InspectionUnknownError(f"The repository has its own {PLANTED_FOLDER} folder, which this tool needs for its proofs.")
+
+
+def copy_project(repository: Path, files: list[str]) -> str:
     try:
-        return json.loads(SETUP_RECORD.read_text())
-    except OSError, ValueError:
-        return None
-
-
-def copy_project(source: Path, files: list[str], destination: Path) -> str:
-    try:
-        shutil.rmtree(destination, ignore_errors=True)
-        for file in files:
-            (destination / file).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source / file, destination / file)
-        set_sql_dialect_if_unset(destination)
-        return project_interpreter_name(destination)
+        shutil.rmtree(INSPECTED_PROJECT, ignore_errors=True)
+        copy_files(repository, files, INSPECTED_PROJECT)
+        copy_files(PROOF_SOURCES, planted_files(), INSPECTED_PROJECT / PLANTED_FOLDER)
+        set_sql_dialect_if_unset(INSPECTED_PROJECT)
+        return project_interpreter_name(INSPECTED_PROJECT)
     except (OSError, ElementTree.ParseError) as error:
-        raise InspectionUnknownError(f"Could not copy {source} into {destination} for PyCharm to inspect: {error}") from error
+        raise InspectionUnknownError(
+            f"Could not copy {repository} into {INSPECTED_PROJECT} for PyCharm to inspect: {error}"
+        ) from error
+
+
+def copy_files(source: Path, files: list[str], destination: Path) -> None:
+    for file in files:
+        (destination / file).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / file, destination / file)
 
 
 def write_run_settings(python_version: str) -> tuple[Path, Path]:
     profile, properties = INSPECTOR_HOME / "profile.xml", INSPECTOR_HOME / "idea.properties"
-    profile.write_text(render_profile(python_version))
+    profile.write_text(PROFILE_TEMPLATE.read_text().replace("PYTHON_VERSION", python_version))
     properties.write_text("".join(f"idea.{kind}.path={INSPECTOR_HOME / kind}\n" for kind in ("config", "system", "plugins", "log")))
     return profile, properties
-
-
-def render_profile(python_version: str) -> str:
-    return PROFILE_TEMPLATE.read_text().replace("PYTHON_VERSION", python_version)
 
 
 def forget_earlier_inspections() -> None:
@@ -315,15 +305,15 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
-def inspect_copy(source: Path, files: list[str], destination: Path, interpreter: Interpreter) -> list[Finding]:
-    interpreter_name = copy_project(source, files, destination)
+def inspect_copy(repository: Path, files: list[str], interpreter: Interpreter) -> list[Finding]:
+    interpreter_name = copy_project(repository, files)
     try:
-        trust_projects((destination,))
+        trust_projects((INSPECTED_PROJECT,))
         register_interpreter({interpreter_name}, interpreter)
         profile, properties = write_run_settings(interpreter.version)
     except OSError as error:
         raise InspectionUnknownError(f"Could not write PyCharm's settings into {INSPECTOR_HOME}: {error}") from error
-    return run_inspector(destination, files, profile, properties)
+    return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, properties)
 
 
 def run_inspector(project: Path, expected: list[str], profile: Path, properties: Path) -> list[Finding]:
@@ -352,57 +342,38 @@ def is_planted(file: Path) -> bool:
 
 def require_proofs_caught(findings: list[Finding]) -> None:
     caught = {(finding.file, finding.line, finding.inspection) for finding in findings}
-    failed = [name for name, planted in PROOFS.items() if planted not in caught]
+    failed = [name for name, (file, line, check) in PROOFS.items() if (f"{PLANTED_FOLDER}/{file}", line, check) not in caught]
     if failed:
         raise InspectionUnknownError(
-            f"These checks did not catch their planted mistake in {PROOF_PROJECT}, so a clean answer would be false: "
-            f"{', '.join(failed)}. Look in {INSPECTOR_HOME / 'log' / 'idea.log'}. A missing plugin comes back if you delete "
-            f"{INSPECTOR_HOME} and run again; ShellCheck needs the shellcheck program on the PATH."
+            f"These checks did not catch their planted mistake in {PLANTED_FOLDER}, so a clean answer would be false: "
+            f"{', '.join(failed)}. Look in {INSPECTOR_HOME / 'log' / 'idea.log'}. A plugin that is missing or disabled in "
+            f"{INSPECTOR_HOME} fails its proof, and deleting that folder reinstalls the plugins; ShellCheck needs the "
+            "shellcheck program on the PATH."
         )
 
 
-def prove_setup(interpreter: Interpreter, *, again: bool) -> None:
-    install_plugins_into_new_home()
-    fingerprint = setup_fingerprint(interpreter.version)
-    proven = read_proven()
-    if proven == fingerprint and not again:
-        return
-    if proven is not None and not again:
-        changed = [part for part, value in fingerprint.items() if proven.get(part) != value]
-        raise InspectionUnknownError(
-            f"These changed since setup proved its checks: {', '.join(changed)}. "
-            "Run `inspect-python --setup` to prove the checks again."
-        )
-    say(f"proving {len(PROOFS)} checks on planted mistakes")
-    require_proofs_caught(inspect_copy(PROOF_SOURCES, planted_files(), PROOF_PROJECT, interpreter))
-    record_proven(fingerprint)
+def is_repository_finding(finding: Finding, repository: Path) -> bool:
+    return not finding.file.startswith(f"{PLANTED_FOLDER}/") and not is_planted(repository / finding.file)
 
 
-def record_proven(fingerprint: dict[str, str | list[str]]) -> None:
-    try:
-        SETUP_RECORD.write_text(json.dumps(fingerprint))
-    except OSError as error:
-        raise InspectionUnknownError(f"The checks were proven, but recording that in {SETUP_RECORD} failed: {error}") from error
-
-
-def inspect_repository(repository: Path, *, setup: bool = False) -> list[Finding]:
+def inspect_repository(repository: Path) -> list[Finding]:
     require_inspector_installed()
     interpreter = read_interpreter(repository)
+    files = repository_files(repository)
+    require_planted_folder_free(files)
     with exclusive_inspector_home():
         forget_earlier_inspections()
-        prove_setup(interpreter, again=setup)
-        files = repository_files(repository)
-        say(f"inspecting {len(files)} files of {repository.name}")
-        findings = inspect_copy(repository, files, REPOSITORY_PROJECT, interpreter)
-        return [finding for finding in findings if not is_planted(repository / finding.file)]
+        install_plugins_into_new_home()
+        say(f"inspecting {len(files)} files of {repository.name} with {len(PROOFS)} planted mistakes")
+        findings = inspect_copy(repository, files, interpreter)
+    require_proofs_caught(findings)
+    return [finding for finding in findings if is_repository_finding(finding, repository)]
 
 
-def main(arguments: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Inspect the repository in the current folder with PyCharm.")
-    parser.add_argument("--setup", action="store_true", help="prove every check on its planted mistake again before inspecting")
+def main() -> int:
     repository = Path.cwd()
     try:
-        findings = inspect_repository(repository, setup=parser.parse_args(arguments).setup)
+        findings = inspect_repository(repository)
     except InspectionUnknownError as error:
         sys.stderr.write(f"UNKNOWN: {error}\n")
         return 2

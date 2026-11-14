@@ -9,6 +9,7 @@ import pytest
 
 from python_inspection import inspection
 from python_inspection.inspection import (
+    PLANTED_FOLDER,
     PROOF_SOURCES,
     PROOFS,
     Finding,
@@ -18,22 +19,28 @@ from python_inspection.inspection import (
     unanalyzed_files,
 )
 
+MAPPER_GUARD = "io.github.mwassong.mapper-guard"
 ONE_INSPECTION_INDEX = json.dumps({"groups": [{"name": "Python", "inspections": [{"shortName": "PyTypeChecker"}]}]})
 FAKE_INSPECTOR = """#!{python}
-import json, pathlib, sys, time
+import json, os, pathlib, sys, time
 project, output = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[3])
+settings = dict(line.split("=", 1) for line in pathlib.Path(os.environ["PYCHARM_PROPERTIES"]).read_text().splitlines())
+disabled_list = pathlib.Path(settings["idea.config.path"]) / "disabled_plugins.txt"
+disabled = disabled_list.read_text().split() if disabled_list.exists() else []
+loaded = {{plugin.name for plugin in pathlib.Path(settings["idea.plugins.path"]).iterdir()}} - set(disabled)
 with pathlib.Path({calls!r}).open("a") as calls:
     calls.write(project.name + "\\n")
 time.sleep({seconds})
 files = [file.relative_to(project).as_posix() for file in project.rglob("*") if file.is_file() and ".idea" not in file.parts]
 print("".join(f"Analyzing code in …/{{file}}\\n" for file in files))
-proofs = {proofs!r} if (project / "canary.py").exists() else []
-problems = [dict(file="file://$PROJECT_DIR$/" + file, line=line, problem_class=dict(id=check), description="planted")
-            for file, line, check in proofs]
-if (project / "report-elsewhere").exists():
-    problems.append(dict(file="file:///elsewhere/app.py", line=1, problem_class=dict(id="Stray"), description="stray"))
+problems = [
+    dict(file=path if path.startswith("/") else "file://$PROJECT_DIR$/" + path, line=line,
+         problem_class=dict(id=check), description=check)
+    for path, line, check, plugin in json.loads(pathlib.Path({reports!r}).read_text())
+    if (path.startswith("/") or (project / path).is_file()) and (plugin is None or plugin in loaded)
+]
 (output / ".descriptions.json").write_text({index!r})
-(output / "Planted.json").write_text(json.dumps(dict(problems=problems)))
+(output / "Reported.json").write_text(json.dumps(dict(problems=problems)))
 """
 
 
@@ -55,37 +62,40 @@ def write_pycharm_results(output: Path, problems: list[dict[str, Any]]) -> Path:
 
 
 def every_proof_caught() -> list[Finding]:
-    return [Finding(file, line, inspection_id, "caught") for file, line, inspection_id in PROOFS.values()]
+    return [Finding(f"{PLANTED_FOLDER}/{file}", line, check, "caught") for file, line, check in PROOFS.values()]
+
+
+def planted_reports() -> list[tuple[str, int, str, str | None]]:
+    return [
+        (f"{PLANTED_FOLDER}/{file}", line, check, MAPPER_GUARD if check == "SqlaReference" else None)
+        for file, line, check in PROOFS.values()
+    ]
+
+
+def set_reports(home: Path, reports: list[tuple[str, int, str, str | None]]) -> None:
+    (home / "reports.json").write_text(json.dumps(reports))
 
 
 def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 0) -> Path:
     pycharm, calls = home / "PyCharm.app" / "Contents", home / "inspector-calls"
     (pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib").mkdir(parents=True)
-    (pycharm / "Resources").mkdir()
-    (pycharm / "Resources" / "product-info.json").write_text("{}")
     (pycharm / "bin").mkdir()
     script = FAKE_INSPECTOR.format(
-        python=sys.executable,
-        calls=str(calls),
-        seconds=seconds,
-        proofs=list(PROOFS.values()),
-        index=ONE_INSPECTION_INDEX,
+        python=sys.executable, calls=str(calls), seconds=seconds, reports=str(home / "reports.json"), index=ONE_INSPECTION_INDEX
     )
     (pycharm / "bin" / "inspect.sh").write_text(script)
     (pycharm / "bin" / "inspect.sh").chmod(0o755)
+    set_reports(home, planted_reports())
     inspector_home = home / "inspector-home"
-    (inspector_home / "plugins" / "a-plugin").mkdir(parents=True)
+    (inspector_home / "plugins" / MAPPER_GUARD).mkdir(parents=True)
     paths = {
         "INSPECTOR": pycharm / "bin" / "inspect.sh",
         "TYPESHED_STDLIB": pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib",
-        "PRODUCT_INFO": pycharm / "Resources" / "product-info.json",
         "INSPECTOR_HOME": inspector_home,
         "INSPECTOR_PLUGINS": inspector_home / "plugins",
         "INSPECTOR_OPTIONS": inspector_home / "config" / "options",
         "INSPECTOR_CACHES": inspector_home / "system",
-        "PROOF_PROJECT": inspector_home / "proofs",
-        "REPOSITORY_PROJECT": inspector_home / "repository",
-        "SETUP_RECORD": inspector_home / "proven.json",
+        "INSPECTED_PROJECT": inspector_home / "project",
     }
     for name, path in paths.items():
         monkeypatch.setattr(inspection, name, path)
@@ -107,18 +117,10 @@ def tree(path: Path) -> dict[str, float]:
     return {file.relative_to(path).as_posix(): file.lstat().st_mtime for file in path.rglob("*") if ".git" not in file.parts}
 
 
-def shellcheck_found(_program: str) -> str:
-    return "/bin/shellcheck"
-
-
-def shellcheck_missing(_program: str) -> None:
-    return None
-
-
 def answer_unknown() -> str:
     errors = StringIO()
     with redirect_stderr(errors):
-        exit_code = inspection.main([])
+        exit_code = inspection.main()
     assert exit_code == 2
     assert errors.getvalue().startswith("UNKNOWN:")
     return errors.getvalue()
@@ -142,43 +144,81 @@ def test_a_file_name_git_quotes_is_still_checked_for_coverage(tmp_path: Path) ->
     assert "src/café.py" in inspection.repository_files(repository)
 
 
-def test_the_proofs_run_once_at_setup_not_on_every_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_launch_inspects_the_repository_and_the_planted_mistakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = install_fake_pycharm(tmp_path, monkeypatch)
     repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
 
     assert inspection.inspect_repository(repository) == []
     assert inspection.inspect_repository(repository) == []
-    assert calls.read_text().split() == ["proofs", "repository", "repository"]
+    assert calls.read_text().split() == ["project", "project"]
 
 
-def test_shellcheck_leaving_the_path_after_setup_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    install_fake_pycharm(tmp_path, monkeypatch)
-    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
-    monkeypatch.setattr(inspection.shutil, "which", shellcheck_found)
-    inspection.inspect_repository(repository)
-    monkeypatch.setattr(inspection.shutil, "which", shellcheck_missing)
-
-    with pytest.raises(InspectionUnknownError, match="shellcheck on the PATH"):
-        inspection.inspect_repository(repository)
-
-
-def test_a_plugin_removed_after_setup_answers_unknown_until_setup_runs_again(
+def test_a_planted_mistake_pycharm_did_not_report_answers_unknown_naming_its_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls = install_fake_pycharm(tmp_path, monkeypatch)
+    install_fake_pycharm(tmp_path, monkeypatch)
+    set_reports(tmp_path, [report for report in planted_reports() if report[2] != "ShellCheck"])
     repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
-    inspection.inspect_repository(repository)
-    (inspection.INSPECTOR_PLUGINS / "a-plugin").rmdir()
 
-    with pytest.raises(InspectionUnknownError, match="installed plugins"):
+    with pytest.raises(InspectionUnknownError, match="ShellCheck"):
         inspection.inspect_repository(repository)
-    assert inspection.inspect_repository(repository, setup=True) == []
-    assert calls.read_text().split() == ["proofs", "repository", "proofs", "repository"]
+
+
+def test_a_removed_plugin_answers_unknown_naming_its_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    (inspection.INSPECTOR_PLUGINS / MAPPER_GUARD).rmdir()
+
+    with pytest.raises(InspectionUnknownError, match="Mapper Guard"):
+        inspection.inspect_repository(repository)
+
+
+def test_a_plugin_disabled_after_a_clean_run_answers_unknown_on_every_later_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    assert inspection.inspect_repository(repository) == []
+    (inspection.INSPECTOR_HOME / "config").mkdir(exist_ok=True)
+    (inspection.INSPECTOR_HOME / "config" / "disabled_plugins.txt").write_text(f"{MAPPER_GUARD}\n")
+
+    for _ in range(2):
+        with pytest.raises(InspectionUnknownError, match="Mapper Guard"):
+            inspection.inspect_repository(repository)
+
+
+def test_a_repository_finding_cannot_satisfy_a_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    look_alike = ("shellcheck.sh", 2, "ShellCheck", None)
+    set_reports(tmp_path, [report for report in planted_reports() if report[2] != "ShellCheck"] + [look_alike])
+    repository = make_repository(tmp_path / "repo", {"shellcheck.sh": "#!/bin/sh\necho $1\n"})
+
+    with pytest.raises(InspectionUnknownError, match="ShellCheck"):
+        inspection.inspect_repository(repository)
+
+
+def test_only_the_repository_findings_are_shown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    set_reports(tmp_path, [*planted_reports(), ("app.py", 1, "PyTypeChecker", None)])
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+
+    assert inspection.inspect_repository(repository) == [Finding("app.py", 1, "PyTypeChecker", "PyTypeChecker")]
+
+
+def test_a_repository_with_a_folder_named_like_the_planted_one_answers_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {f"{PLANTED_FOLDER}/shellcheck.sh": "#!/bin/sh\n"})
+
+    with pytest.raises(InspectionUnknownError, match=PLANTED_FOLDER):
+        inspection.inspect_repository(repository)
 
 
 def test_a_report_at_a_path_the_tool_did_not_ask_about_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     install_fake_pycharm(tmp_path, monkeypatch)
-    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n", "report-elsewhere": ""})
+    set_reports(tmp_path, [*planted_reports(), ("/elsewhere/app.py", 1, "Stray", None)])
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
 
     with pytest.raises(InspectionUnknownError, match="did not ask about"):
         inspection.inspect_repository(repository)
@@ -215,21 +255,15 @@ def test_every_proof_names_a_planted_file_and_line() -> None:
 
 
 def test_every_proof_caught_as_pycharm_reports_it_passes(tmp_path: Path) -> None:
-    problems = [pycharm_problem(file, line, inspection_id) for file, line, inspection_id in PROOFS.values()]
+    problems = [pycharm_problem(f"{PLANTED_FOLDER}/{file}", line, check) for file, line, check in PROOFS.values()]
 
     require_proofs_caught(read_findings(write_pycharm_results(tmp_path, problems)))
 
 
-def test_a_missing_plugin_answers_unknown_naming_its_proof() -> None:
-    without_mapper_guard = [finding for finding in every_proof_caught() if finding.inspection != "SqlaReference"]
-
-    with pytest.raises(InspectionUnknownError, match="Mapper Guard"):
-        require_proofs_caught(without_mapper_guard)
-
-
 def test_an_unresolved_standard_library_import_does_not_pass_as_the_canary() -> None:
-    stdlib_missing = Finding("canary.py", 1, "PyUnresolvedReferencesInspection", "Unresolved reference 'pathlib'")
-    findings = [finding for finding in every_proof_caught() if finding.file != "canary.py"] + [stdlib_missing]
+    canary = f"{PLANTED_FOLDER}/canary.py"
+    stdlib_missing = Finding(canary, 1, "PyUnresolvedReferencesInspection", "Unresolved reference 'pathlib'")
+    findings = [finding for finding in every_proof_caught() if finding.file != canary] + [stdlib_missing]
 
     with pytest.raises(InspectionUnknownError, match="standard library"):
         require_proofs_caught(findings)
@@ -238,14 +272,14 @@ def test_an_unresolved_standard_library_import_does_not_pass_as_the_canary() -> 
 def test_a_finding_reaches_the_output_and_fails_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
     mistake = Finding("src/app/mistake.py", 3, "PyTypeCheckerInspection", "Expected type 'int'")
 
-    def inspect_with_one_mistake(_repository: Path, *, setup: bool) -> list[Finding]:
-        return [] if setup else [mistake]
+    def inspect_with_one_mistake(_repository: Path) -> list[Finding]:
+        return [mistake]
 
     monkeypatch.setattr(inspection, "inspect_repository", inspect_with_one_mistake)
 
     output = StringIO()
     with redirect_stdout(output):
-        exit_code = inspection.main([])
+        exit_code = inspection.main()
 
     assert exit_code == 1
     assert "src/app/mistake.py:3: Expected type 'int'" in output.getvalue()
