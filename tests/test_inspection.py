@@ -30,6 +30,8 @@ print("".join(f"Analyzing code in …/{{file}}\\n" for file in files))
 proofs = {proofs!r} if (project / "canary.py").exists() else []
 problems = [dict(file="file://$PROJECT_DIR$/" + file, line=line, problem_class=dict(id=check), description="planted")
             for file, line, check in proofs]
+if (project / "report-elsewhere").exists():
+    problems.append(dict(file="file:///elsewhere/app.py", line=1, problem_class=dict(id="Stray"), description="stray"))
 (output / ".descriptions.json").write_text({index!r})
 (output / "Planted.json").write_text(json.dumps(dict(problems=problems)))
 """
@@ -116,7 +118,7 @@ def shellcheck_missing(_program: str) -> None:
 def answer_unknown() -> str:
     errors = StringIO()
     with redirect_stderr(errors):
-        exit_code = inspection.main()
+        exit_code = inspection.main([])
     assert exit_code == 2
     assert errors.getvalue().startswith("UNKNOWN:")
     return errors.getvalue()
@@ -149,16 +151,37 @@ def test_the_proofs_run_once_at_setup_not_on_every_run(tmp_path: Path, monkeypat
     assert calls.read_text().split() == ["proofs", "repository", "repository"]
 
 
-def test_shellcheck_leaving_the_path_proves_the_checks_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = install_fake_pycharm(tmp_path, monkeypatch)
+def test_shellcheck_leaving_the_path_after_setup_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
     repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
     monkeypatch.setattr(inspection.shutil, "which", shellcheck_found)
     inspection.inspect_repository(repository)
     monkeypatch.setattr(inspection.shutil, "which", shellcheck_missing)
 
-    inspection.inspect_repository(repository)
+    with pytest.raises(InspectionUnknownError, match="shellcheck on the PATH"):
+        inspection.inspect_repository(repository)
 
+
+def test_a_plugin_removed_after_setup_answers_unknown_until_setup_runs_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    inspection.inspect_repository(repository)
+    (inspection.INSPECTOR_PLUGINS / "a-plugin").rmdir()
+
+    with pytest.raises(InspectionUnknownError, match="installed plugins"):
+        inspection.inspect_repository(repository)
+    assert inspection.inspect_repository(repository, setup=True) == []
     assert calls.read_text().split() == ["proofs", "repository", "proofs", "repository"]
+
+
+def test_a_report_at_a_path_the_tool_did_not_ask_about_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n", "report-elsewhere": ""})
+
+    with pytest.raises(InspectionUnknownError, match="did not ask about"):
+        inspection.inspect_repository(repository)
 
 
 def test_a_run_writes_nothing_into_the_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,14 +238,14 @@ def test_an_unresolved_standard_library_import_does_not_pass_as_the_canary() -> 
 def test_a_finding_reaches_the_output_and_fails_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
     mistake = Finding("src/app/mistake.py", 3, "PyTypeCheckerInspection", "Expected type 'int'")
 
-    def inspect_with_one_mistake(_repository: Path) -> list[Finding]:
-        return [mistake]
+    def inspect_with_one_mistake(_repository: Path, *, setup: bool) -> list[Finding]:
+        return [] if setup else [mistake]
 
     monkeypatch.setattr(inspection, "inspect_repository", inspect_with_one_mistake)
 
     output = StringIO()
     with redirect_stdout(output):
-        exit_code = inspection.main()
+        exit_code = inspection.main([])
 
     assert exit_code == 1
     assert "src/app/mistake.py:3: Expected type 'int'" in output.getvalue()

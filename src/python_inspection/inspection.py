@@ -1,3 +1,4 @@
+import argparse
 import fcntl
 import hashlib
 import io
@@ -101,7 +102,7 @@ def read_findings(output: Path) -> list[Finding]:
             continue
         findings.extend(
             Finding(
-                file=problem["file"].removeprefix("file://$PROJECT_DIR$/"),
+                file=problem.get("file", "").removeprefix("file://$PROJECT_DIR$/"),
                 line=problem.get("line", 0),
                 inspection=problem["problem_class"]["id"],
                 description=problem["description"],
@@ -218,19 +219,19 @@ def install_plugins_into_new_home() -> None:
 def setup_fingerprint(python_version: str) -> dict[str, str | list[str]]:
     tool_files = sorted(file for file in PACKAGE.rglob("*") if file.is_file() and "__pycache__" not in file.parts)
     return {
-        "tool": hashlib.sha256(b"".join(file.read_bytes() for file in tool_files)).hexdigest(),
-        "pycharm": hashlib.sha256(PRODUCT_INFO.read_bytes()).hexdigest(),
-        "plugins": sorted(plugin.name for plugin in INSPECTOR_PLUGINS.iterdir()),
-        "shellcheck": shutil.which("shellcheck") or "",
-        "python": python_version,
+        "PyCharm build": hashlib.sha256(PRODUCT_INFO.read_bytes()).hexdigest(),
+        "installed plugins": sorted(plugin.name for plugin in INSPECTOR_PLUGINS.iterdir()),
+        "profile": hashlib.sha256(render_profile(python_version).encode()).hexdigest(),
+        "shellcheck on the PATH": shutil.which("shellcheck") or "",
+        "this tool": hashlib.sha256(b"".join(file.read_bytes() for file in tool_files)).hexdigest(),
     }
 
 
-def is_proven(fingerprint: dict[str, str | list[str]]) -> bool:
+def read_proven() -> dict[str, str | list[str]] | None:
     try:
-        return json.loads(SETUP_RECORD.read_text()) == fingerprint
+        return json.loads(SETUP_RECORD.read_text())
     except OSError, ValueError:
-        return False
+        return None
 
 
 def copy_project(source: Path, files: list[str], destination: Path) -> str:
@@ -247,9 +248,13 @@ def copy_project(source: Path, files: list[str], destination: Path) -> str:
 
 def write_run_settings(python_version: str) -> tuple[Path, Path]:
     profile, properties = INSPECTOR_HOME / "profile.xml", INSPECTOR_HOME / "idea.properties"
-    profile.write_text(PROFILE_TEMPLATE.read_text().replace("PYTHON_VERSION", python_version))
+    profile.write_text(render_profile(python_version))
     properties.write_text("".join(f"idea.{kind}.path={INSPECTOR_HOME / kind}\n" for kind in ("config", "system", "plugins", "log")))
     return profile, properties
+
+
+def render_profile(python_version: str) -> str:
+    return PROFILE_TEMPLATE.read_text().replace("PYTHON_VERSION", python_version)
 
 
 def forget_earlier_inspections() -> None:
@@ -331,7 +336,14 @@ def run_inspector(project: Path, expected: list[str], profile: Path, properties:
         missing = unanalyzed_files(expected, result.stdout)
         if missing:
             raise InspectionUnknownError(f"PyCharm finished {project} without analyzing: {', '.join(missing)}")
-        return read_findings(Path(output))
+        findings = read_findings(Path(output))
+    unrecognised = sorted({finding.file for finding in findings} - set(expected))
+    if unrecognised:
+        raise InspectionUnknownError(
+            f"PyCharm reported problems in {project} at paths this tool did not ask about, so it cannot tell what they mean: "
+            f"{', '.join(repr(file) for file in unrecognised)}"
+        )
+    return findings
 
 
 def is_planted(file: Path) -> bool:
@@ -349,15 +361,19 @@ def require_proofs_caught(findings: list[Finding]) -> None:
         )
 
 
-def prove_setup(interpreter: Interpreter) -> None:
+def prove_setup(interpreter: Interpreter, *, again: bool) -> None:
     install_plugins_into_new_home()
     fingerprint = setup_fingerprint(interpreter.version)
-    if is_proven(fingerprint):
+    proven = read_proven()
+    if proven == fingerprint and not again:
         return
-    say(
-        f"proving {len(PROOFS)} checks on planted mistakes; this happens again only when PyCharm, the plugins, shellcheck, "
-        "the Python version or this tool changes"
-    )
+    if proven is not None and not again:
+        changed = [part for part, value in fingerprint.items() if proven.get(part) != value]
+        raise InspectionUnknownError(
+            f"These changed since setup proved its checks: {', '.join(changed)}. "
+            "Run `inspect-python --setup` to prove the checks again."
+        )
+    say(f"proving {len(PROOFS)} checks on planted mistakes")
     require_proofs_caught(inspect_copy(PROOF_SOURCES, planted_files(), PROOF_PROJECT, interpreter))
     record_proven(fingerprint)
 
@@ -369,22 +385,24 @@ def record_proven(fingerprint: dict[str, str | list[str]]) -> None:
         raise InspectionUnknownError(f"The checks were proven, but recording that in {SETUP_RECORD} failed: {error}") from error
 
 
-def inspect_repository(repository: Path) -> list[Finding]:
+def inspect_repository(repository: Path, *, setup: bool = False) -> list[Finding]:
     require_inspector_installed()
     interpreter = read_interpreter(repository)
     with exclusive_inspector_home():
         forget_earlier_inspections()
-        prove_setup(interpreter)
+        prove_setup(interpreter, again=setup)
         files = repository_files(repository)
         say(f"inspecting {len(files)} files of {repository.name}")
         findings = inspect_copy(repository, files, REPOSITORY_PROJECT, interpreter)
-        return [finding for finding in findings if finding.file in files and not is_planted(repository / finding.file)]
+        return [finding for finding in findings if not is_planted(repository / finding.file)]
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Inspect the repository in the current folder with PyCharm.")
+    parser.add_argument("--setup", action="store_true", help="prove every check on its planted mistake again before inspecting")
     repository = Path.cwd()
     try:
-        findings = inspect_repository(repository)
+        findings = inspect_repository(repository, setup=parser.parse_args(arguments).setup)
     except InspectionUnknownError as error:
         sys.stderr.write(f"UNKNOWN: {error}\n")
         return 2
