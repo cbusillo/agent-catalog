@@ -1,4 +1,5 @@
 import json
+import sys
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -17,6 +18,22 @@ from python_inspection.inspection import (
     unanalyzed_files,
 )
 
+ONE_INSPECTION_INDEX = json.dumps({"groups": [{"name": "Python", "inspections": [{"shortName": "PyTypeChecker"}]}]})
+FAKE_INSPECTOR = """#!{python}
+import json, pathlib, sys, time
+project, output = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[3])
+with pathlib.Path({calls!r}).open("a") as calls:
+    calls.write(project.name + "\\n")
+time.sleep({seconds})
+files = [file.relative_to(project).as_posix() for file in project.rglob("*") if file.is_file() and ".idea" not in file.parts]
+print("".join(f"Analyzing code in …/{{file}}\\n" for file in files))
+proofs = {proofs!r} if (project / "canary.py").exists() else []
+problems = [dict(file="file://$PROJECT_DIR$/" + file, line=line, problem_class=dict(id=check), description="planted")
+            for file, line, check in proofs]
+(output / ".descriptions.json").write_text({index!r})
+(output / "Planted.json").write_text(json.dumps(dict(problems=problems)))
+"""
+
 
 def pycharm_problem(file: str, line: int, inspection_id: str) -> dict[str, Any]:
     return {
@@ -29,7 +46,7 @@ def pycharm_problem(file: str, line: int, inspection_id: str) -> dict[str, Any]:
 
 def write_pycharm_results(output: Path, problems: list[dict[str, Any]]) -> Path:
     output.mkdir(parents=True, exist_ok=True)
-    (output / ".descriptions.json").write_text("{}")
+    (output / ".descriptions.json").write_text(ONE_INSPECTION_INDEX)
     for index, problem in enumerate(problems):
         (output / f"{problem['problem_class']['id']}-{index}.json").write_text(json.dumps({"problems": [problem]}))
     return output
@@ -37,6 +54,63 @@ def write_pycharm_results(output: Path, problems: list[dict[str, Any]]) -> Path:
 
 def every_proof_caught() -> list[Finding]:
     return [Finding(file, line, inspection_id, "caught") for file, line, inspection_id in PROOFS.values()]
+
+
+def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 0) -> Path:
+    pycharm, calls = home / "PyCharm.app" / "Contents", home / "inspector-calls"
+    (pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib").mkdir(parents=True)
+    (pycharm / "Resources").mkdir()
+    (pycharm / "Resources" / "product-info.json").write_text("{}")
+    (pycharm / "bin").mkdir()
+    script = FAKE_INSPECTOR.format(
+        python=sys.executable,
+        calls=str(calls),
+        seconds=seconds,
+        proofs=list(PROOFS.values()),
+        index=ONE_INSPECTION_INDEX,
+    )
+    (pycharm / "bin" / "inspect.sh").write_text(script)
+    (pycharm / "bin" / "inspect.sh").chmod(0o755)
+    inspector_home = home / "inspector-home"
+    (inspector_home / "plugins" / "a-plugin").mkdir(parents=True)
+    paths = {
+        "INSPECTOR": pycharm / "bin" / "inspect.sh",
+        "TYPESHED_STDLIB": pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib",
+        "PRODUCT_INFO": pycharm / "Resources" / "product-info.json",
+        "INSPECTOR_HOME": inspector_home,
+        "INSPECTOR_PLUGINS": inspector_home / "plugins",
+        "INSPECTOR_OPTIONS": inspector_home / "config" / "options",
+        "INSPECTOR_CACHES": inspector_home / "system",
+        "PROOF_PROJECT": inspector_home / "proofs",
+        "REPOSITORY_PROJECT": inspector_home / "repository",
+        "SETUP_RECORD": inspector_home / "proven.json",
+    }
+    for name, path in paths.items():
+        monkeypatch.setattr(inspection, name, path)
+    return calls
+
+
+def make_repository(path: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(text)
+    (path / ".venv" / "bin").mkdir(parents=True)
+    (path / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    (path / ".gitignore").write_text(".venv/\n")
+    assert inspection.run_quietly(["git", "init", "-q"], path).returncode == 0
+    return path
+
+
+def tree(path: Path) -> dict[str, float]:
+    return {file.relative_to(path).as_posix(): file.lstat().st_mtime for file in path.rglob("*") if ".git" not in file.parts}
+
+
+def shellcheck_found(_program: str) -> str:
+    return "/bin/shellcheck"
+
+
+def shellcheck_missing(_program: str) -> None:
+    return None
 
 
 def answer_unknown() -> str:
@@ -51,6 +125,59 @@ def answer_unknown() -> str:
 def test_results_without_the_index_are_unknown_not_clean(tmp_path: Path) -> None:
     with pytest.raises(InspectionUnknownError):
         read_findings(tmp_path)
+
+
+def test_a_results_index_listing_no_inspections_is_unknown_not_clean(tmp_path: Path) -> None:
+    (tmp_path / ".descriptions.json").write_text("{}")
+
+    with pytest.raises(InspectionUnknownError, match="lists no inspections"):
+        read_findings(tmp_path)
+
+
+def test_a_file_name_git_quotes_is_still_checked_for_coverage(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path, {"src/café.py": "x = 1\n"})
+
+    assert "src/café.py" in inspection.repository_files(repository)
+
+
+def test_the_proofs_run_once_at_setup_not_on_every_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+
+    assert inspection.inspect_repository(repository) == []
+    assert inspection.inspect_repository(repository) == []
+    assert calls.read_text().split() == ["proofs", "repository", "repository"]
+
+
+def test_shellcheck_leaving_the_path_proves_the_checks_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    monkeypatch.setattr(inspection.shutil, "which", shellcheck_found)
+    inspection.inspect_repository(repository)
+    monkeypatch.setattr(inspection.shutil, "which", shellcheck_missing)
+
+    inspection.inspect_repository(repository)
+
+    assert calls.read_text().split() == ["proofs", "repository", "proofs", "repository"]
+
+
+def test_a_run_writes_nothing_into_the_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n", "queries.py": "SQL = 'select 1'\n"})
+    before = tree(repository)
+
+    inspection.inspect_repository(repository)
+
+    assert tree(repository) == before
+
+
+def test_an_inspector_that_never_finishes_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch, seconds=30)
+    monkeypatch.setattr(inspection, "INSPECTOR_TIMEOUT_SECONDS", 1)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+
+    with pytest.raises(InspectionUnknownError, match="did not finish"):
+        inspection.inspect_repository(repository)
 
 
 def test_a_file_the_inspector_skipped_is_reported() -> None:
@@ -177,7 +304,7 @@ def test_project_settings_without_an_interpreter_gain_one_and_keep_the_rest(tmp_
     assert 'name="Black"' in settings.read_text()
 
 
-def test_a_repository_sql_dialect_is_kept(tmp_path: Path) -> None:
+def test_a_checked_in_sql_dialect_is_kept(tmp_path: Path) -> None:
     dialects = tmp_path / ".idea" / "sqldialects.xml"
     dialects.parent.mkdir()
     dialects.write_text("<project />")

@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -20,11 +21,15 @@ PACKAGE = Path(__file__).resolve().parent
 PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM", Path.home() / "Applications" / "PyCharm.app"))
 INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python"))
 INSPECTOR = PYCHARM / "Contents" / "bin" / "inspect.sh"
+PRODUCT_INFO = PYCHARM / "Contents" / "Resources" / "product-info.json"
 TYPESHED_STDLIB = PYCHARM / "Contents" / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 INSPECTOR_PLUGINS = INSPECTOR_HOME / "plugins"
 INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
 PROOF_PROJECT = INSPECTOR_HOME / "proofs"
+REPOSITORY_PROJECT = INSPECTOR_HOME / "repository"
+SETUP_RECORD = INSPECTOR_HOME / "proven.json"
+INSPECTOR_TIMEOUT_SECONDS = 900
 PROFILE_TEMPLATE = PACKAGE / "profile.xml"
 PROOF_SOURCES = PACKAGE / "proofs"
 ANALYZED_LINE_PREFIX = "Analyzing code in …/"
@@ -89,8 +94,7 @@ PROOFS = {
 
 
 def read_findings(output: Path) -> list[Finding]:
-    if not (output / RESULTS_INDEX).is_file():
-        raise InspectionUnknownError(f"PyCharm wrote no results index to {output}, so the inspection did not finish.")
+    require_inspections_listed(output / RESULTS_INDEX)
     findings: list[Finding] = []
     for report in sorted(output.glob("*.json")):
         if report.name == RESULTS_INDEX or report.name.endswith("_aggregate.json"):
@@ -107,6 +111,17 @@ def read_findings(output: Path) -> list[Finding]:
     return findings
 
 
+def require_inspections_listed(index: Path) -> None:
+    try:
+        groups = json.loads(index.read_text()).get("groups", [])
+    except (OSError, ValueError, AttributeError) as error:
+        raise InspectionUnknownError(
+            f"PyCharm wrote no readable results index at {index}, so the inspection did not finish."
+        ) from error
+    if not any(group.get("inspections") for group in groups):
+        raise InspectionUnknownError(f"PyCharm's results index {index} lists no inspections, so it checked nothing.")
+
+
 def unanalyzed_files(expected: list[str], inspector_log: str) -> list[str]:
     analyzed = {
         line.removeprefix(ANALYZED_LINE_PREFIX) for line in inspector_log.splitlines() if line.startswith(ANALYZED_LINE_PREFIX)
@@ -116,14 +131,31 @@ def unanalyzed_files(expected: list[str], inspector_log: str) -> list[str]:
 
 def run_quietly(command: list[str | Path], cwd: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ | (extra_env or {})
-    return subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, check=False)  # noqa: S603 commands are this tool's own
+    try:
+        return subprocess.run(  # noqa: S603 commands are this tool's own
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=INSPECTOR_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise InspectionUnknownError(f"{command[0]} did not finish within {INSPECTOR_TIMEOUT_SECONDS} seconds in {cwd}.") from error
+
+
+def say(progress: str) -> None:
+    sys.stderr.write(f"inspect-python: {progress}\n")
+    sys.stderr.flush()
 
 
 def repository_files(repository: Path) -> list[str]:
-    result = run_quietly(["git", "ls-files", "--cached", "--others", "--exclude-standard"], repository)
+    result = run_quietly(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], repository)
     if result.returncode != 0:
         raise InspectionUnknownError(f"Could not list the files of {repository} with git: {result.stderr.strip()}")
-    return sorted(file for file in result.stdout.splitlines() if (repository / file).is_file())
+    return sorted(file for file in result.stdout.split("\0") if file and (repository / file).is_file())
 
 
 def planted_files() -> list[str]:
@@ -131,7 +163,7 @@ def planted_files() -> list[str]:
 
 
 def require_inspector_installed() -> None:
-    for required in (INSPECTOR, TYPESHED_STDLIB):
+    for required in (INSPECTOR, TYPESHED_STDLIB, PRODUCT_INFO):
         if not required.exists():
             raise InspectionUnknownError(
                 f"PyCharm 2026.3 is not where this tool looks for it: {required} is missing. "
@@ -170,6 +202,7 @@ def exclusive_inspector_home() -> Generator[None]:
 def install_plugins_into_new_home() -> None:
     if INSPECTOR_PLUGINS.exists():
         return
+    say(f"installing {len(PLUGINS)} PyCharm plugins into {INSPECTOR_PLUGINS}")
     partial = INSPECTOR_HOME / "plugins.partial"
     shutil.rmtree(partial, ignore_errors=True)
     for plugin, version in PLUGINS.items():
@@ -182,21 +215,34 @@ def install_plugins_into_new_home() -> None:
     partial.rename(INSPECTOR_PLUGINS)
 
 
-def prepare_inspection(repository: Path) -> tuple[Path, Path]:
-    forget_earlier_inspections()
+def setup_fingerprint(python_version: str) -> dict[str, str | list[str]]:
+    tool_files = sorted(file for file in PACKAGE.rglob("*") if file.is_file() and "__pycache__" not in file.parts)
+    return {
+        "tool": hashlib.sha256(b"".join(file.read_bytes() for file in tool_files)).hexdigest(),
+        "pycharm": hashlib.sha256(PRODUCT_INFO.read_bytes()).hexdigest(),
+        "plugins": sorted(plugin.name for plugin in INSPECTOR_PLUGINS.iterdir()),
+        "shellcheck": shutil.which("shellcheck") or "",
+        "python": python_version,
+    }
+
+
+def is_proven(fingerprint: dict[str, str | list[str]]) -> bool:
     try:
-        install_plugins_into_new_home()
-        interpreter = read_interpreter(repository)
-        shutil.rmtree(PROOF_PROJECT, ignore_errors=True)
-        shutil.copytree(PROOF_SOURCES, PROOF_PROJECT)
-        trust_projects((repository, PROOF_PROJECT))
-        names = {project_interpreter_name(repository), project_interpreter_name(PROOF_PROJECT)}
-        register_interpreter(names, interpreter)
-        set_sql_dialect_if_unset(repository)
-        set_sql_dialect_if_unset(PROOF_PROJECT)
-        return write_run_settings(interpreter.version)
+        return json.loads(SETUP_RECORD.read_text()) == fingerprint
+    except OSError, ValueError:
+        return False
+
+
+def copy_project(source: Path, files: list[str], destination: Path) -> str:
+    try:
+        shutil.rmtree(destination, ignore_errors=True)
+        for file in files:
+            (destination / file).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / file, destination / file)
+        set_sql_dialect_if_unset(destination)
+        return project_interpreter_name(destination)
     except (OSError, ElementTree.ParseError) as error:
-        raise InspectionUnknownError(f"Could not prepare PyCharm to inspect {repository}: {error}") from error
+        raise InspectionUnknownError(f"Could not copy {source} into {destination} for PyCharm to inspect: {error}") from error
 
 
 def write_run_settings(python_version: str) -> tuple[Path, Path]:
@@ -264,6 +310,17 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
+def inspect_copy(source: Path, files: list[str], destination: Path, interpreter: Interpreter) -> list[Finding]:
+    interpreter_name = copy_project(source, files, destination)
+    try:
+        trust_projects((destination,))
+        register_interpreter({interpreter_name}, interpreter)
+        profile, properties = write_run_settings(interpreter.version)
+    except OSError as error:
+        raise InspectionUnknownError(f"Could not write PyCharm's settings into {INSPECTOR_HOME}: {error}") from error
+    return run_inspector(destination, files, profile, properties)
+
+
 def run_inspector(project: Path, expected: list[str], profile: Path, properties: Path) -> list[Finding]:
     with tempfile.TemporaryDirectory() as output:
         command = [INSPECTOR, project, profile, output, "-v2", "-format", "json"]
@@ -292,13 +349,35 @@ def require_proofs_caught(findings: list[Finding]) -> None:
         )
 
 
+def prove_setup(interpreter: Interpreter) -> None:
+    install_plugins_into_new_home()
+    fingerprint = setup_fingerprint(interpreter.version)
+    if is_proven(fingerprint):
+        return
+    say(
+        f"proving {len(PROOFS)} checks on planted mistakes; this happens again only when PyCharm, the plugins, shellcheck, "
+        "the Python version or this tool changes"
+    )
+    require_proofs_caught(inspect_copy(PROOF_SOURCES, planted_files(), PROOF_PROJECT, interpreter))
+    record_proven(fingerprint)
+
+
+def record_proven(fingerprint: dict[str, str | list[str]]) -> None:
+    try:
+        SETUP_RECORD.write_text(json.dumps(fingerprint))
+    except OSError as error:
+        raise InspectionUnknownError(f"The checks were proven, but recording that in {SETUP_RECORD} failed: {error}") from error
+
+
 def inspect_repository(repository: Path) -> list[Finding]:
     require_inspector_installed()
+    interpreter = read_interpreter(repository)
     with exclusive_inspector_home():
-        profile, properties = prepare_inspection(repository)
-        require_proofs_caught(run_inspector(PROOF_PROJECT, planted_files(), profile, properties))
+        forget_earlier_inspections()
+        prove_setup(interpreter)
         files = repository_files(repository)
-        findings = run_inspector(repository, files, profile, properties)
+        say(f"inspecting {len(files)} files of {repository.name}")
+        findings = inspect_copy(repository, files, REPOSITORY_PROJECT, interpreter)
         return [finding for finding in findings if finding.file in files and not is_planted(repository / finding.file)]
 
 
