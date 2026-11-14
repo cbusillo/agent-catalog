@@ -23,4 +23,4 @@ Every piece follows the same four rules as Launchplane:
 
 ## Pieces
 
-None yet. The first is the PyCharm inspection wrapper, moving here from `launchplane-next`.
+- **Python inspection** (`inspect-python`): runs PyCharm's inspector on a repository and answers `clean`, the findings, or `UNKNOWN`. It proves each of its checks on planted mistakes before it may say `clean`. First used by `launchplane-next`. See [docs/python-inspection.md](docs/python-inspection.md).

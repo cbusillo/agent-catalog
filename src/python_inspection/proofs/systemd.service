@@ -1,0 +1,6 @@
+[Unit]
+Description=Proof unit
+
+[Service]
+ExecStart=/usr/bin/true
+Restart=sometimes

@@ -1,0 +1,4 @@
+services:
+  app:
+    image: python:3.15-slim
+    restrt: always
