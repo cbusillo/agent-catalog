@@ -233,8 +233,10 @@ def test_the_inspector_uses_a_private_copy_of_the_installed_dependency(
         {
             ".idea/misc.xml": settings,
             "verify_environment.py": (
+                "import subprocess, sys\n"
                 "from pathlib import Path\n"
                 "import catalog_fixture_dependency as dep\n"
+                "subprocess.run([Path(sys.executable).with_name('fixture-command')], check=True)\n"
                 "assert dep.answer == 42\n"
                 "package = Path(dep.__file__)\n"
                 "package.write_text('answer = 7\\n')\n"
@@ -253,15 +255,24 @@ def test_the_inspector_uses_a_private_copy_of_the_installed_dependency(
         package.symlink_to(repository / "editable_source.py")
     package.write_text("answer = 42\n")
     (packages / "load_dependency.pth").write_text("import catalog_fixture_dependency\n")
+    command = env / "bin" / "fixture-command"
+    command.write_text("#!/bin/sh\nexit 0\n")
+    command.chmod(0o555)
+    data = packages / "fixture-data"
+    data.mkdir()
+    (data / "input").touch(mode=0o444)
+    data.chmod(0o555)
     before = tree(repository)
     environment_before = tree(env)
 
-    inspection.inspect_repository(repository)
+    for _ in range(2):
+        inspection.inspect_repository(repository)
 
     inspected = Path(receipt.read_text())
     assert inspected.is_relative_to(inspection.INSPECTOR_HOME)
     assert inspected.read_text() == "answer = 7\n"
     assert package.read_text() == "answer = 42\n"
+    assert not (data.stat().st_mode | (data / "input").stat().st_mode) & 0o200
     assert tree(env) == environment_before
     assert tree(repository) == before
     assert (inspection.INSPECTED_PROJECT / ".idea" / "misc.xml").read_text() == settings

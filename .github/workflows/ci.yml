@@ -38,8 +38,11 @@ jobs:
           git init --quiet "$RUNNER_TEMP/clean-project"
           cd "$RUNNER_TEMP/clean-project"
           echo '.venv/' >> .git/info/exclude
-          uv init --bare --python 3.15
+          uv init --bare --lib --build-backend uv --author-from none --name clean-project --python 3.15
+          mkdir -p src/clean_project
+          printf 'def twice(number: int) -> int:\n    return number + number\n' > src/clean_project/__init__.py
           uv sync
-          printf 'def twice(number: int) -> int:\n    return number + number\n' > example.py
-          git add example.py pyproject.toml uv.lock
+          git add src pyproject.toml uv.lock
           "$GITHUB_WORKSPACE/.venv/bin/inspect-python"
+          cd "$INSPECT_PYTHON_HOME/project"
+          .venv/bin/python -IB -c 'from pathlib import Path; import clean_project; assert Path(clean_project.__file__).resolve().is_relative_to(Path.cwd())'

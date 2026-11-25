@@ -243,6 +243,16 @@ def require_planted_folder_free(files: list[str]) -> None:
         raise InspectionUnknownError(f"The repository has its own {PLANTED_FOLDER} folder, which this tool needs for its proofs.")
 
 
+def copy_environment(source: Path, destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    for part in source.iterdir():
+        # Preserve interpreter launchers; installed package files must be private even when uv linked them.
+        part.resolve().copy(destination / part.name, follow_symlinks=part.name != "bin")
+    for copied in destination.rglob("*"):
+        if copied.is_file(follow_symlinks=False) and os.access(source / copied.relative_to(destination), os.X_OK):
+            copied.chmod(0o700)
+
+
 def copy_project(repository: Path, files: list[str]) -> Path:
     environment = repository / ".venv"
     private_env = INSPECTED_PROJECT / ".venv"
@@ -254,10 +264,8 @@ def copy_project(repository: Path, files: list[str]) -> Path:
         copy_files(repository, [file for file in files if not file.startswith(".venv/")], INSPECTED_PROJECT)
         copy_files(PROOF_SOURCES, planted_files(), INSPECTED_PROJECT / PLANTED_FOLDER)
         set_sql_dialect_if_unset(INSPECTED_PROJECT)
-        private_env.mkdir()
-        for part in environment.iterdir():
-            # Preserve interpreter launchers; installed package files must be private even when uv linked them.
-            part.resolve().copy(private_env / part.name, follow_symlinks=part.name != "bin", preserve_metadata=True)
+        exclude_venv_in_plain_project(INSPECTED_PROJECT)
+        copy_environment(environment, private_env)
     except OSError as error:
         raise InspectionUnknownError(f"Could not copy {repository} and its environment into {INSPECTED_PROJECT}: {error}") from error
     return private_env / "bin" / "python"
@@ -304,9 +312,49 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
+def exclude_venv_in_plain_project(project: Path) -> None:
+    modules = project / ".idea" / "modules.xml"
+    if modules.exists() or ((project / "pyproject.toml").is_file() and (project / "uv.lock").is_file()):
+        return
+    # On the first inspection PyCharm can scan site-packages before its automatic module excludes .venv.
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".iml", dir=modules.parent, delete=False) as module:
+        module.write(
+            '<module type="PYTHON_MODULE" version="4"><component name="NewModuleRootManager">'
+            '<content url="file://$MODULE_DIR$"><excludeFolder url="file://$MODULE_DIR$/.venv"/></content>'
+            '<orderEntry type="inheritedJdk"/><orderEntry type="sourceFolder" forTests="false"/></component></module>\n'
+        )
+    path = f"$PROJECT_DIR$/.idea/{Path(module.name).name}"
+    modules.write_text(
+        '<project version="4"><component name="ProjectModuleManager"><modules>'
+        f'<module fileurl="file://{path}" filepath="{path}"/></modules></component></project>\n'
+    )
+
+
+def install_local_editables(repository: Path, interpreter: Path, lock_fd: int) -> None:
+    env = {"PYTHONDONTWRITEBYTECODE": "1"}
+    listed = run_quietly(["uv", "pip", "list", "--editable", "--format", "json", "--python", interpreter], INSPECTED_PROJECT, env)
+    if listed.returncode:
+        raise InspectionUnknownError(f"Could not identify editable packages in the private environment: {listed.stderr.strip()}")
+    packages: list[str | Path] = []
+    for distribution in json.loads(listed.stdout):
+        original = Path(distribution["editable_project_location"]).resolve()
+        if original.is_relative_to(repository):
+            packages.extend(("--editable", INSPECTED_PROJECT / original.relative_to(repository)))
+    if packages:
+        installed = run_quietly(
+            ["uv", "pip", "install", "--offline", "--no-deps", "--python", interpreter, *packages],
+            INSPECTED_PROJECT,
+            env,
+            pass_fds=(lock_fd,),
+        )
+        if installed.returncode:
+            raise InspectionUnknownError(f"Could not install editable packages from the private copy: {installed.stderr.strip()}")
+
+
 def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Finding]:
     interpreter = copy_project(repository, files)
     try:
+        install_local_editables(repository, interpreter, lock_fd)
         trust_projects((INSPECTED_PROJECT,))
         profile, properties = write_run_settings(python_version(interpreter))
     except OSError as error:
