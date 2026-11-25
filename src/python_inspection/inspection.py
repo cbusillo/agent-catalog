@@ -133,9 +133,8 @@ def unanalyzed_files(expected: list[str], inspector_log: str, project: Path) -> 
 
 
 def run_quietly(
-    command: list[str | Path], cwd: Path, extra_env: dict[str, str] | None = None, *, pass_fds: tuple[int, ...] = ()
+    command: list[str | Path], cwd: Path, env: dict[str, str] | None = None, *, pass_fds: tuple[int, ...] = ()
 ) -> subprocess.CompletedProcess[str]:
-    env = os.environ | (extra_env or {})
     try:
         return subprocess.run(  # noqa: S603 commands are this tool's own
             command,
@@ -331,9 +330,13 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
+def is_uv_project(project: Path) -> bool:
+    return (project / "pyproject.toml").is_file() and (project / "uv.lock").is_file()
+
+
 def configure_plain_project(project: Path) -> None:
     modules = project / ".idea" / "modules.xml"
-    if modules.exists() or ((project / "pyproject.toml").is_file() and (project / "uv.lock").is_file()):
+    if modules.exists() or is_uv_project(project):
         return
     # A bare directory can finish its first inspection before PyCharm assigns its interpreter.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".iml", dir=modules.parent, delete=False) as module:
@@ -350,7 +353,7 @@ def configure_plain_project(project: Path) -> None:
 
 
 def install_local_editables(repository: Path, interpreter: Path, lock_fd: int) -> None:
-    env = {"PYTHONDONTWRITEBYTECODE": "1"}
+    env = os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}
     listed = run_quietly(["uv", "pip", "list", "--editable", "--format", "json", "--python", interpreter], INSPECTED_PROJECT, env)
     if listed.returncode:
         raise InspectionUnknownError(f"Could not identify editable packages in the private environment: {listed.stderr.strip()}")
@@ -378,7 +381,13 @@ def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Findi
         profile, properties = write_run_settings(python_version(interpreter))
     except OSError as error:
         raise InspectionUnknownError(f"Could not prepare PyCharm to inspect {INSPECTED_PROJECT}: {error}") from error
-    settings = {"PYCHARM_PROPERTIES": str(properties), "PYCHARM_PYTHON_PATH": str(interpreter), "PYTHONDONTWRITEBYTECODE": "1"}
+    settings = os.environ | {"PYCHARM_PROPERTIES": str(properties), "PYTHONDONTWRITEBYTECODE": "1"}
+    if is_uv_project(INSPECTED_PROJECT):
+        # Forcing the Python executable here can register a generic SDK and silence uv dependency inspections.
+        settings.pop("PYCHARM_PYTHON_PATH", None)
+        settings.pop("UV_PROJECT_ENVIRONMENT", None)
+    else:
+        settings["PYCHARM_PYTHON_PATH"] = str(interpreter)
     return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, settings, lock_fd)
 
 
