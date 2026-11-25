@@ -36,7 +36,8 @@ with pathlib.Path({calls!r}).open("a") as calls:
 time.sleep({seconds})
 if (project / "verify_environment.py").exists():
     subprocess.run([os.environ["PYCHARM_PYTHON_PATH"], "-I", "-B", project / "verify_environment.py"], check=True)
-files = [file.relative_to(project).as_posix() for file in project.rglob("*") if file.is_file() and ".venv" not in file.parts]
+files = [file.relative_to(project).as_posix() for file in project.rglob("*")
+         if file.is_file() and ".venv" not in file.parts and ".idea" not in file.parts and file.suffix != ".iml"]
 print("".join(f"Analyzing code in …/{{file}}\\n" for file in files))
 problems = [
     dict(file=path if path.startswith("/") else "file://$PROJECT_DIR$/" + path, line=line,
@@ -158,6 +159,38 @@ def test_a_file_name_git_quotes_is_still_checked_for_coverage(tmp_path: Path) ->
     repository = make_repository(tmp_path, {"src/café.py": "x = 1\n"})
 
     assert "src/café.py" in inspection.repository_files(repository)
+
+
+def test_an_unignored_environment_is_not_source_but_a_tracked_environment_file_is_reported_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = install_fake_pycharm(tmp_path, monkeypatch)
+    repo = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    (repo / ".gitignore").unlink()
+    assert inspection.inspect_repository(repo) == []
+    calls.unlink()
+    (repo / ".venv" / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
+    assert inspection.run_quietly(["git", "add", "-f", ".venv/pyvenv.cfg"], repo).returncode == 0
+
+    with pytest.raises(InspectionUnknownError, match=r"\.venv/pyvenv\.cfg"):
+        inspection.inspect_repository(repo)
+    assert not calls.exists()
+
+
+def test_shared_module_settings_reach_the_ide_and_keep_their_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    module = "packages/store/store.iml"
+    content = '<module type="PYTHON_MODULE" version="4" />'
+    repo = make_repository(tmp_path / "repo", {module: content, ".idea/modules.xml": "<project />", "app.py": "x = 1\n"})
+    assert inspection.run_quietly(["git", "add", "-f", module, ".idea/modules.xml"], repo).returncode == 0
+    set_reports(tmp_path, [*planted_reports(), (module, 1, "ExampleInspection", None)])
+
+    assert inspection.inspect_repository(repo) == [Finding(module, 1, "ExampleInspection", "ExampleInspection")]
+    assert (inspection.INSPECTED_PROJECT / module).read_text() == content
+    (repo / ".idea" / "helper.py").write_text("x = 1\n")
+    assert inspection.run_quietly(["git", "add", "-f", ".idea/helper.py"], repo).returncode == 0
+    with pytest.raises(InspectionUnknownError, match=r"\.idea/helper\.py"):
+        inspection.inspect_repository(repo)
 
 
 def test_one_launch_inspects_the_repository_and_the_planted_mistakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -146,10 +146,17 @@ def say(progress: str) -> None:
 
 
 def repository_files(repository: Path) -> list[str]:
-    result = run_quietly(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], repository)
+    result = run_quietly(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--exclude=/.venv/"], repository)
     if result.returncode != 0:
         raise InspectionUnknownError(f"Could not list the files of {repository} with git: {result.stderr.strip()}")
-    return sorted(file for file in result.stdout.split("\0") if file and (repository / file).is_file())
+    files = sorted(file for file in result.stdout.split("\0") if file and (repository / file).is_file())
+    for file in files:
+        if file.startswith(".venv/"):
+            raise InspectionUnknownError(
+                f"Git tracks {file} inside the virtual environment, which PyCharm excludes from source inspection. "
+                "Move tracked source outside .venv or remove environment files from the Git index."
+            )
+    return files
 
 
 def planted_files() -> list[str]:
@@ -261,7 +268,7 @@ def copy_project(repository: Path, files: list[str]) -> Path:
             INSPECTED_PROJECT.unlink()
         elif INSPECTED_PROJECT.exists():
             shutil.rmtree(INSPECTED_PROJECT)
-        copy_files(repository, [file for file in files if not file.startswith(".venv/")], INSPECTED_PROJECT)
+        copy_files(repository, files, INSPECTED_PROJECT)
         copy_files(PROOF_SOURCES, planted_files(), INSPECTED_PROJECT / PLANTED_FOLDER)
         set_sql_dialect_if_unset(INSPECTED_PROJECT)
         configure_plain_project(INSPECTED_PROJECT)
@@ -370,7 +377,10 @@ def run_inspector(project: Path, expected: list[str], profile: Path, settings: d
         if result.returncode != 0:
             last_lines = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
             raise InspectionUnknownError(f"PyCharm's inspector exited {result.returncode} on {project}:\n{last_lines}")
-        missing = unanalyzed_files(expected, result.stdout)
+        configuration = {file for file in expected if is_project_setting(file)}
+        if configuration:
+            say(f"copied as project settings: {', '.join(sorted(configuration))}")
+        missing = unanalyzed_files([file for file in expected if file not in configuration], result.stdout)
         if missing:
             raise InspectionUnknownError(f"PyCharm finished {project} without analyzing: {', '.join(missing)}")
         findings = read_findings(Path(output))
@@ -381,6 +391,16 @@ def run_inspector(project: Path, expected: list[str], profile: Path, settings: d
             f"{', '.join(repr(file) for file in unrecognised)}"
         )
     return findings
+
+
+def is_project_setting(file: str) -> bool:
+    return file.endswith(".iml") or file in {
+        ".idea/.gitignore",
+        ".idea/modules.xml",
+        ".idea/misc.xml",
+        ".idea/sqldialects.xml",
+        ".idea/vcs.xml",
+    }
 
 
 def is_planted(file: Path) -> bool:
@@ -403,6 +423,7 @@ def is_repository_finding(finding: Finding, repository: Path) -> bool:
 
 
 def inspect_repository(repository: Path) -> list[Finding]:
+    repository = repository.resolve()
     require_home_apart_from(repository)
     if not (repository / ".venv" / "bin" / "python").is_file():
         raise InspectionUnknownError(

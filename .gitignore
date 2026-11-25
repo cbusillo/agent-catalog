@@ -1,5 +1,8 @@
 /.venv/
-/.idea/
+/.idea/*
+!/.idea/.gitignore
+!/.idea/*.iml
+!/.idea/modules.xml
 __pycache__/
 /.ruff_cache/
 /.pytest_cache/
