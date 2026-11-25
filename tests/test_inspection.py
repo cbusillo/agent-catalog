@@ -1,4 +1,5 @@
 import json
+import shutil
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -76,9 +77,22 @@ def set_reports(home: Path, reports: list[tuple[str, int, str, str | None]]) -> 
     (home / "reports.json").write_text(json.dumps(reports))
 
 
-def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 0) -> Path:
-    pycharm, calls = home / "PyCharm.app" / "Contents", home / "inspector-calls"
-    monkeypatch.setenv("INSPECT_PYTHON_PYCHARM", str(pycharm.parent))
+def write_build(app: Path, build: str) -> None:
+    metadata = app / "Contents" / "Resources" / "product-info.json"
+    metadata.parent.mkdir(parents=True, exist_ok=True)
+    metadata.write_text(json.dumps({"productCode": "PY", "buildNumber": build}))
+
+
+def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 0, *, pinned: bool = False) -> Path:
+    inspector_home = home / "inspector-home"
+    if pinned:
+        app = inspector_home / "ides" / inspection.PYCHARM_BUILD / "PyCharm.app"
+        write_build(app, inspection.PYCHARM_BUILD)
+        monkeypatch.delenv("INSPECT_PYTHON_PYCHARM", raising=False)
+    else:
+        app = home / "PyCharm.app"
+        monkeypatch.setenv("INSPECT_PYTHON_PYCHARM", str(app))
+    pycharm, calls = app / "Contents", home / "inspector-calls"
     (pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib").mkdir(parents=True)
     (pycharm / "bin").mkdir()
     script = FAKE_INSPECTOR.format(
@@ -87,9 +101,9 @@ def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: i
     (pycharm / "bin" / "inspect.sh").write_text(script)
     (pycharm / "bin" / "inspect.sh").chmod(0o755)
     set_reports(home, planted_reports())
-    inspector_home = home / "inspector-home"
     (inspector_home / "plugins" / MAPPER_GUARD).mkdir(parents=True)
     paths = {
+        "PYCHARM": app,
         "INSPECTOR": pycharm / "bin" / "inspect.sh",
         "TYPESHED_STDLIB": pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib",
         "INSPECTOR_HOME": inspector_home,
@@ -403,13 +417,81 @@ def test_a_checked_in_sql_dialect_is_kept(tmp_path: Path) -> None:
 
 
 def test_a_different_build_in_the_pinned_cache_cannot_inspect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    install_fake_pycharm(tmp_path, monkeypatch)
-    app = tmp_path / "PyCharm.app"
-    metadata = app / "Contents" / "Resources" / "product-info.json"
-    metadata.parent.mkdir(parents=True)
-    metadata.write_text(json.dumps({"productCode": "PY", "buildNumber": "0.0"}))
-    monkeypatch.setattr(inspection, "PYCHARM", app)
-    monkeypatch.delenv("INSPECT_PYTHON_PYCHARM", raising=False)
+    install_fake_pycharm(tmp_path, monkeypatch, pinned=True)
+    write_build(inspection.PYCHARM, "0.0")
 
     with pytest.raises(InspectionUnknownError, match="build"):
         inspection.inspect_repository(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
+
+
+def copy_build(ides: Path, build: str) -> Path:
+    app = ides / build / "PyCharm.app"
+    shutil.copytree(inspection.PYCHARM, app)
+    write_build(app, build)
+    return app
+
+
+def test_an_update_keeps_the_previous_build_until_the_new_one_catches_the_proofs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch, pinned=True)
+    previous = copy_build(inspection.INSPECTOR_HOME / "ides", "1.0")
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    set_reports(tmp_path, [report for report in planted_reports() if report[2] != "ShellCheck"])
+
+    with pytest.raises(InspectionUnknownError, match="ShellCheck"):
+        inspection.inspect_repository(repository)
+    assert previous.is_dir()
+    assert inspection.PYCHARM.is_dir()
+
+    set_reports(tmp_path, [*planted_reports(), ("app.py", 1, "PyTypeChecker", None)])
+    for _ in range(2):
+        assert inspection.inspect_repository(repository) == [Finding("app.py", 1, "PyTypeChecker", "PyTypeChecker")]
+        assert not previous.exists()
+        assert inspection.PYCHARM.is_dir()
+
+
+def test_retiring_cached_builds_preserves_unrelated_files_and_linked_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch, pinned=True)
+    ides = inspection.INSPECTOR_HOME / "ides"
+    previous = copy_build(ides, "1.0")
+    sibling = previous.parent / "keep.txt"
+    sibling.touch()
+    mismatch = copy_build(ides, "1.1")
+    write_build(mismatch, "20.0")
+    outside = copy_build(tmp_path / "elsewhere", "1.2")
+    (ides / "1.2").symlink_to(outside.parent, target_is_directory=True)
+    foreign = copy_build(tmp_path / "elsewhere", "1.3")
+    (ides / "1.3").mkdir()
+    (ides / "1.3" / "PyCharm.app").symlink_to(foreign, target_is_directory=True)
+
+    inspection.inspect_repository(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
+
+    assert not previous.exists()
+    assert sibling.is_file()
+    assert mismatch.is_dir()
+    assert (ides / "1.2" / "PyCharm.app").is_dir()
+    assert (ides / "1.3" / "PyCharm.app").is_dir()
+
+
+def test_an_explicit_application_leaves_cached_builds_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    previous = copy_build(inspection.INSPECTOR_HOME / "ides", "1.0")
+
+    inspection.inspect_repository(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
+
+    assert previous.is_dir()
+
+
+def test_a_linked_ide_cache_does_not_retire_an_external_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch, pinned=True)
+    ides = inspection.INSPECTOR_HOME / "ides"
+    external = ides.rename(tmp_path / "elsewhere")
+    ides.symlink_to(external, target_is_directory=True)
+
+    previous = copy_build(external, "1.0")
+    inspection.inspect_repository(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
+
+    assert previous.is_dir()

@@ -10,8 +10,8 @@ uvx --from git+https://github.com/<owner>/agent-catalog@v0.1.0 inspect-python
 
 ## Settings
 
-- On a Mac, the first run downloads the pinned build from JetBrains, verifies its SHA-256 and installs it under `ides/<build>/PyCharm.app` in the inspection home. Later runs check and reuse that build. Old build directories can be removed when no inspection is using them.
-- Set `INSPECT_PYTHON_PYCHARM` to a specific application to test a different installation.
+- On a Mac, the first run downloads the pinned build from JetBrains, verifies its SHA-256 and installs it under `ides/<build>/PyCharm.app` in the inspection home. An update keeps the previous IDE until the new one inspects the project and catches the planted mistakes. Then the inspector removes the other managed builds, even when it found a problem in the project. A failed proof keeps the previous IDE for retry or rollback.
+- Set `INSPECT_PYTHON_PYCHARM` to test a specific application. This leaves the managed IDEs in place.
 - `INSPECT_PYTHON_HOME`: the folder PyCharm uses as its home while inspecting. Default `~/.cache/inspect-python`. It must not be inside the repository or contain it; the tool refuses with `UNKNOWN`.
 
 The repository must have its interpreter at `.venv/bin/python`, as `uv sync` leaves it.

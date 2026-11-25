@@ -176,18 +176,23 @@ def require_home_apart_from(repository: Path) -> None:
         )
 
 
+def run_installer(*options: str) -> subprocess.CompletedProcess[str]:
+    # The installer handles stalled downloads and unmounts the disk image on exit.
+    return subprocess.run(  # noqa: S603 the packaged installer manages the build in this home
+        ["/bin/bash", PACKAGE / "install-pycharm.sh", PYCHARM_BUILD, PYCHARM, *options],
+        cwd=INSPECTOR_HOME,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def require_inspector_installed() -> None:
     if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
         if not PYCHARM.exists():
             say(f"downloading PyCharm build {PYCHARM_BUILD}")
-        # The installer handles stalled downloads and unmounts the disk image on exit.
-        result = subprocess.run(  # noqa: S603 the packaged installer takes a build and a destination
-            ["/bin/bash", PACKAGE / "install-pycharm.sh", PYCHARM_BUILD, PYCHARM],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = run_installer()
         if result.returncode:
             raise InspectionUnknownError(f"Could not prepare PyCharm build {PYCHARM_BUILD}: {result.stderr.strip()}")
         say(f"using PyCharm build {PYCHARM_BUILD}")
@@ -398,7 +403,13 @@ def inspect_repository(repository: Path) -> list[Finding]:
         install_plugins_into_new_home()
         say(f"inspecting {len(files)} files of {repository.name} with {len(PROOFS)} planted mistakes")
         findings = inspect_copy(repository, files, interpreter)
-    require_proofs_caught(findings)
+        require_proofs_caught(findings)
+        if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
+            cleanup = run_installer("--retire-others")
+            if cleanup.stdout:
+                say(cleanup.stdout.strip())
+            if cleanup.returncode:
+                say(f"Could not finish removing old PyCharm builds: {cleanup.stderr.strip()}")
     return [finding for finding in findings if is_repository_finding(finding, repository)]
 
 

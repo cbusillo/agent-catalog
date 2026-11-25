@@ -10,14 +10,35 @@ fi
 
 check_app() {
     if [[ ! -x $1/Contents/bin/inspect.sh ]] ||
-        ! jq -e --arg build "$build" '.productCode == "PY" and .buildNumber == $build' "$1/Contents/Resources/product-info.json" >/dev/null; then
-        echo "Expected an inspectable PyCharm build $build at $1." >&2
+        ! jq -e --arg build "$2" '.productCode == "PY" and .buildNumber == $build' "$1/Contents/Resources/product-info.json" >/dev/null; then
+        echo "Expected an inspectable PyCharm build $2 at $1." >&2
         return 1
     fi
 }
 
+if [[ ${3:-} == --retire-others ]]; then
+    if [[ $app != "$PWD/ides/$build/PyCharm.app" || -L $PWD/ides || -L ${app%/*} || -L $app ]]; then
+        exit 0
+    fi
+    check_app "$app" "$build"
+    for previous in "$PWD"/ides/*/PyCharm.app; do
+        directory=${previous%/*}
+        number=${directory##*/}
+        [[ $previous != "$app" && $number =~ ^[0-9]+(\.[0-9]+)+$ && ! -L $directory && ! -L $previous ]] || continue
+        check_app "$previous" "$number" 2>/dev/null || continue
+        # The next inspection clears system even if removal is interrupted after the rename.
+        mkdir -p system
+        retired=$(mktemp -d "$PWD/system/retired.XXXXXX")
+        mv "$previous" "$retired/"
+        rm -r "$retired"
+        rmdir "$directory" 2>/dev/null || true
+        echo "retired PyCharm build $number"
+    done
+    exit 0
+fi
+
 if [[ -e $app || -L $app ]]; then
-    check_app "$app"
+    check_app "$app" "$build"
     exit 0
 fi
 
@@ -57,5 +78,5 @@ mkdir mount
 hdiutil attach -readonly -nobrowse -mountpoint "$work/mount" PyCharm.dmg >&2
 mounted=true
 ditto mount/PyCharm.app PyCharm.app
-check_app "$work/PyCharm.app"
+check_app "$work/PyCharm.app" "$build"
 mv PyCharm.app "$app"
