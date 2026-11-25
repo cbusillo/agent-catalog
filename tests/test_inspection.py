@@ -181,15 +181,28 @@ def test_shared_module_settings_reach_the_ide_and_keep_their_findings(tmp_path: 
     install_fake_pycharm(tmp_path, monkeypatch)
     module = "packages/store/store.iml"
     content = '<module type="PYTHON_MODULE" version="4" />'
-    repo = make_repository(tmp_path / "repo", {module: content, ".idea/modules.xml": "<project />", "app.py": "x = 1\n"})
-    assert inspection.run_quietly(["git", "add", "-f", module, ".idea/modules.xml"], repo).returncode == 0
+    repo = make_repository(
+        tmp_path / "repo",
+        {
+            module: content,
+            ".idea/modules.xml": '<project><component name="ProjectModuleManager" /></project>',
+            ".idea/inspectionProfiles/shared.xml": '<component name="InspectionProjectProfileManager" />',
+            "app.py": "x = 1\n",
+        },
+    )
+    assert (
+        inspection.run_quietly(
+            ["git", "add", "-f", module, ".idea/modules.xml", ".idea/inspectionProfiles/shared.xml"], repo
+        ).returncode
+        == 0
+    )
     set_reports(tmp_path, [*planted_reports(), (module, 1, "ExampleInspection", None)])
 
     assert inspection.inspect_repository(repo) == [Finding(module, 1, "ExampleInspection", "ExampleInspection")]
     assert (inspection.INSPECTED_PROJECT / module).read_text() == content
-    (repo / ".idea" / "helper.py").write_text("x = 1\n")
-    assert inspection.run_quietly(["git", "add", "-f", ".idea/helper.py"], repo).returncode == 0
-    with pytest.raises(InspectionUnknownError, match=r"\.idea/helper\.py"):
+    (repo / ".idea" / "data.xml").write_text("<application-data />")
+    assert inspection.run_quietly(["git", "add", "-f", ".idea/data.xml"], repo).returncode == 0
+    with pytest.raises(InspectionUnknownError, match=r"\.idea/data\.xml"):
         inspection.inspect_repository(repo)
 
 

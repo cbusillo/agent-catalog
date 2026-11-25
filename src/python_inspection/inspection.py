@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
+from xml.etree import ElementTree
 from xml.sax.saxutils import quoteattr
 
 PACKAGE = Path(__file__).resolve().parent
@@ -382,15 +383,15 @@ def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Findi
 
 
 def run_inspector(project: Path, expected: list[str], profile: Path, settings: dict[str, str], lock_fd: int) -> list[Finding]:
+    configuration = {file for file in expected if is_project_setting(project, file)}
+    if configuration:
+        say(f"copied as project settings: {', '.join(sorted(configuration))}")
     with tempfile.TemporaryDirectory() as output:
         command = [INSPECTOR, project, profile, output, "-v2", "-format", "json", "-scope", "!file:.venv//*"]
         result = run_quietly(command, INSPECTOR_HOME, settings, pass_fds=(lock_fd,))
         if result.returncode != 0:
             last_lines = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
             raise InspectionUnknownError(f"PyCharm's inspector exited {result.returncode} on {project}:\n{last_lines}")
-        configuration = {file for file in expected if is_project_setting(file)}
-        if configuration:
-            say(f"copied as project settings: {', '.join(sorted(configuration))}")
         missing = unanalyzed_files([file for file in expected if file not in configuration], result.stdout, project)
         if missing:
             raise InspectionUnknownError(f"PyCharm finished {project} without analyzing: {', '.join(missing)}")
@@ -404,14 +405,19 @@ def run_inspector(project: Path, expected: list[str], profile: Path, settings: d
     return findings
 
 
-def is_project_setting(file: str) -> bool:
-    return file.endswith(".iml") or file in {
-        ".idea/.gitignore",
-        ".idea/modules.xml",
-        ".idea/misc.xml",
-        ".idea/sqldialects.xml",
-        ".idea/vcs.xml",
-    }
+def is_project_setting(project: Path, file: str) -> bool:
+    path = Path(file)
+    if path.suffix == ".iml" or (path.name == ".gitignore" and path.parent.name == ".idea"):
+        return True
+    if path.suffix != ".xml" or ".idea" not in path.parent.parts:
+        return False
+    try:
+        root = ElementTree.parse(project / path).getroot()  # noqa: S314 only the element names of the private copy are used
+    except ElementTree.ParseError, OSError, LookupError:
+        return False
+    return (root.tag == "component" and bool(root.get("name"))) or (
+        root.tag == "project" and root.find("component[@name]") is not None
+    )
 
 
 def is_planted(file: Path) -> bool:
