@@ -78,6 +78,7 @@ def set_reports(home: Path, reports: list[tuple[str, int, str, str | None]]) -> 
 
 def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 0) -> Path:
     pycharm, calls = home / "PyCharm.app" / "Contents", home / "inspector-calls"
+    monkeypatch.setenv("INSPECT_PYTHON_PYCHARM", str(pycharm.parent))
     (pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib").mkdir(parents=True)
     (pycharm / "bin").mkdir()
     script = FAKE_INSPECTOR.format(
@@ -314,9 +315,11 @@ def test_a_finding_reaches_the_output_and_fails_the_command(monkeypatch: pytest.
 
 
 def test_missing_pycharm_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INSPECT_PYTHON_PYCHARM", str(tmp_path))
     monkeypatch.setattr(inspection, "INSPECTOR", tmp_path / "inspect.sh")
 
-    assert "INSPECT_PYTHON_PYCHARM" in answer_unknown()
+    with pytest.raises(InspectionUnknownError, match="INSPECT_PYTHON_PYCHARM"):
+        inspection.require_inspector_installed()
 
 
 def test_a_repository_without_an_interpreter_answers_unknown(tmp_path: Path) -> None:
@@ -397,3 +400,16 @@ def test_a_checked_in_sql_dialect_is_kept(tmp_path: Path) -> None:
     inspection.set_sql_dialect_if_unset(tmp_path)
 
     assert dialects.read_text() == "<project />"
+
+
+def test_a_different_build_in_the_pinned_cache_cannot_inspect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    app = tmp_path / "PyCharm.app"
+    metadata = app / "Contents" / "Resources" / "product-info.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({"productCode": "PY", "buildNumber": "0.0"}))
+    monkeypatch.setattr(inspection, "PYCHARM", app)
+    monkeypatch.delenv("INSPECT_PYTHON_PYCHARM", raising=False)
+
+    with pytest.raises(InspectionUnknownError, match="build"):
+        inspection.inspect_repository(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))

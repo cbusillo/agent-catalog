@@ -1,6 +1,6 @@
 # Python inspection
 
-`inspect-python` runs PyCharm 2026.3's command-line inspector on the repository in the current folder. It prints `clean`, the findings, or `UNKNOWN` with the reason. Exit codes: 0 clean, 1 findings, 2 unknown.
+`inspect-python` runs PyCharm's command-line inspector on the repository in the current folder. It prints `clean`, the findings, or `UNKNOWN` with the reason. Exit codes: 0 clean, 1 findings, 2 unknown.
 
 A repository calls it pinned to a release:
 
@@ -10,10 +10,13 @@ uvx --from git+https://github.com/<owner>/agent-catalog@v0.1.0 inspect-python
 
 ## Settings
 
-- `INSPECT_PYTHON_PYCHARM`: the PyCharm application. Default `~/Applications/PyCharm.app`.
+- On a Mac, the first run downloads the pinned build from JetBrains, verifies its SHA-256 and installs it under `ides/<build>/PyCharm.app` in the inspection home. Later runs check and reuse that build. Old build directories can be removed when no inspection is using them.
+- Set `INSPECT_PYTHON_PYCHARM` to a specific application to test a different installation.
 - `INSPECT_PYTHON_HOME`: the folder PyCharm uses as its home while inspecting. Default `~/.cache/inspect-python`. It must not be inside the repository or contain it; the tool refuses with `UNKNOWN`.
 
 The repository must have its interpreter at `.venv/bin/python`, as `uv sync` leaves it.
+
+Renovate checks JetBrains' stable builds weekly. On a pull request, a GitHub-hosted Mac runs the proposed build through `inspect-python` on a clean Python project. A missed planted mistake fails that check.
 
 ## What a run does
 

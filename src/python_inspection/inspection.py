@@ -17,8 +17,9 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import quoteattr
 
 PACKAGE = Path(__file__).resolve().parent
-PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM", Path.home() / "Applications" / "PyCharm.app"))
-INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python"))
+PYCHARM_BUILD = "263.8311.32"
+INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python")).resolve()
+PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM") or INSPECTOR_HOME / "ides" / PYCHARM_BUILD / "PyCharm.app")
 INSPECTOR = PYCHARM / "Contents" / "bin" / "inspect.sh"
 TYPESHED_STDLIB = PYCHARM / "Contents" / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 INSPECTOR_PLUGINS = INSPECTOR_HOME / "plugins"
@@ -176,10 +177,17 @@ def require_home_apart_from(repository: Path) -> None:
 
 
 def require_inspector_installed() -> None:
+    if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
+        if not PYCHARM.exists():
+            say(f"downloading PyCharm build {PYCHARM_BUILD}")
+        result = run_quietly(["/bin/bash", PACKAGE / "install-pycharm.sh", PYCHARM_BUILD, PYCHARM], INSPECTOR_HOME)
+        if result.returncode:
+            raise InspectionUnknownError(f"Could not prepare PyCharm build {PYCHARM_BUILD}: {result.stderr.strip()}")
+        say(f"using PyCharm build {PYCHARM_BUILD}")
     for required in (INSPECTOR, TYPESHED_STDLIB):
         if not required.exists():
             raise InspectionUnknownError(
-                f"PyCharm 2026.3 is not where this tool looks for it: {required} is missing. "
+                f"The selected PyCharm application is incomplete: {required} is missing. "
                 "Set INSPECT_PYTHON_PYCHARM to the PyCharm application."
             )
 
@@ -374,11 +382,11 @@ def is_repository_finding(finding: Finding, repository: Path) -> bool:
 
 def inspect_repository(repository: Path) -> list[Finding]:
     require_home_apart_from(repository)
-    require_inspector_installed()
     interpreter = read_interpreter(repository)
     files = repository_files(repository)
     require_planted_folder_free(files)
     with exclusive_inspector_home():
+        require_inspector_installed()
         forget_earlier_inspections()
         install_plugins_into_new_home()
         say(f"inspecting {len(files)} files of {repository.name} with {len(PROOFS)} planted mistakes")
