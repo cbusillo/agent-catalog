@@ -41,7 +41,8 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 cd "$work"
 
-download=(curl --fail --silent --show-error --location --retry 2 --proto '=https' --proto-redir '=https')
+download=(curl --fail --silent --show-error --location --retry 2 --connect-timeout 30 --speed-limit 1024 --speed-time 60
+    --proto '=https' --proto-redir '=https')
 "${download[@]}" "https://data.services.jetbrains.com/products/releases?code=PCP&type=release,rc&build=$build" -o release.json
 artifact=$(jq -ce --arg build "$build" --arg platform "$platform" '.PCP[] | select(.build == $build) | .downloads[$platform] // empty' release.json) ||
     { echo "JetBrains did not list PyCharm $build for $platform." >&2; exit 1; }

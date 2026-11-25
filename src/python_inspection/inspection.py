@@ -180,7 +180,14 @@ def require_inspector_installed() -> None:
     if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
         if not PYCHARM.exists():
             say(f"downloading PyCharm build {PYCHARM_BUILD}")
-        result = run_quietly(["/bin/bash", PACKAGE / "install-pycharm.sh", PYCHARM_BUILD, PYCHARM], INSPECTOR_HOME)
+        # The installer handles stalled downloads and unmounts the disk image on exit.
+        result = subprocess.run(  # noqa: S603 the packaged installer takes a build and a destination
+            ["/bin/bash", PACKAGE / "install-pycharm.sh", PYCHARM_BUILD, PYCHARM],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if result.returncode:
             raise InspectionUnknownError(f"Could not prepare PyCharm build {PYCHARM_BUILD}: {result.stderr.strip()}")
         say(f"using PyCharm build {PYCHARM_BUILD}")
