@@ -373,6 +373,23 @@ def install_local_editables(repository: Path, interpreter: Path, lock_fd: int) -
             raise InspectionUnknownError(f"Could not install editable packages from the private copy: {installed.stderr.strip()}")
 
 
+def warm_uv_project(project: Path, settings: dict[str, str], lock_fd: int) -> None:
+    launcher = PYCHARM / "Contents" / "MacOS" / "pycharm"
+    result = run_quietly([launcher, "warmup", f"--project-dir={project}"], INSPECTOR_HOME, settings, pass_fds=(lock_fd,))
+    if result.returncode:
+        detail = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
+        raise InspectionUnknownError(f"PyCharm could not initialize the private uv project (exit {result.returncode}):\n{detail}")
+    try:
+        table = ElementTree.parse(INSPECTOR_OPTIONS / "jdk.table.xml")  # noqa: S314 written by PyCharm in its private home
+        for sdk in table.iterfind(".//jdk/additional[@IS_UV='true']"):
+            location = sdk.get("UV_VENV_PATH", "").replace("$USER_HOME$", str(Path.home())).replace("$PROJECT_DIR$", str(project))
+            if Path(location) == project / ".venv":
+                return
+    except (OSError, ElementTree.ParseError) as error:
+        raise InspectionUnknownError(f"Could not read PyCharm's uv interpreter after warmup: {error}") from error
+    raise InspectionUnknownError(f"PyCharm finished warmup without registering {project / '.venv'} as a uv environment.")
+
+
 def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Finding]:
     interpreter = copy_project(repository, files)
     try:
@@ -386,6 +403,7 @@ def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Findi
         # Forcing the Python executable here can register a generic SDK and silence uv dependency inspections.
         settings.pop("PYCHARM_PYTHON_PATH", None)
         settings.pop("UV_PROJECT_ENVIRONMENT", None)
+        warm_uv_project(INSPECTED_PROJECT, settings, lock_fd)
     else:
         settings["PYCHARM_PYTHON_PATH"] = str(interpreter)
     return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, settings, lock_fd)
