@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
-from xml.etree import ElementTree
 from xml.sax.saxutils import quoteattr
 
 PACKAGE = Path(__file__).resolve().parent
@@ -21,7 +20,6 @@ PYCHARM_BUILD = "263.8311.32"
 INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python")).resolve()
 PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM") or INSPECTOR_HOME / "ides" / PYCHARM_BUILD / "PyCharm.app")
 INSPECTOR = PYCHARM / "Contents" / "bin" / "inspect.sh"
-TYPESHED_STDLIB = PYCHARM / "Contents" / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 INSPECTOR_PLUGINS = INSPECTOR_HOME / "plugins"
 INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
@@ -32,7 +30,6 @@ PROOF_SOURCES = PACKAGE / "proofs"
 PLANTED_FOLDER = "inspect-python-planted-mistakes"
 ANALYZED_LINE_PREFIX = "Analyzing code in …/"
 RESULTS_INDEX = ".descriptions.json"
-DEFAULT_INTERPRETER_NAME = "inspect-python"
 POSTGRESQL_DIALECT = (
     '<project version="4"><component name="SqlDialectMappings"><file url="PROJECT" dialect="PostgreSQL" /></component></project>\n'
 )
@@ -45,10 +42,6 @@ PLUGINS = {
     "net.sjrx.intellij.plugins.systemdunitfiles": "242.261111.978",
     "dev.protsenko.security-linter": "2.0.21",
 }
-INTERPRETER_FACTS = (
-    "import json, sys, sysconfig; print(json.dumps({'version': f'{sys.version_info[0]}.{sys.version_info[1]}', "
-    "'roots': [sysconfig.get_path('stdlib'), sysconfig.get_path('stdlib') + '/lib-dynload', sysconfig.get_path('purelib')]}))"
-)
 
 
 class InspectionUnknownError(Exception):
@@ -64,13 +57,6 @@ class Finding:
 
     def __str__(self) -> str:
         return f"{self.file}:{self.line}: {self.description} [{self.inspection}]"
-
-
-@dataclass(frozen=True)
-class Interpreter:
-    executable: Path
-    version: str
-    roots: list[Path]
 
 
 PROOFS = {
@@ -171,12 +157,13 @@ def planted_files() -> list[str]:
 
 
 def require_home_apart_from(repository: Path) -> None:
-    home, checkout = INSPECTOR_HOME.resolve(), repository.resolve()
-    if home.is_relative_to(checkout) or checkout.is_relative_to(home):
-        raise InspectionUnknownError(
-            f"PyCharm's inspection home {home} and the repository {checkout} are inside one another, so the tool's copy "
-            "could overwrite the repository or land in it. Set INSPECT_PYTHON_HOME to a folder outside the repository."
-        )
+    home = INSPECTOR_HOME.resolve()
+    for source in (repository.resolve(), (repository / ".venv").resolve()):
+        if home.is_relative_to(source) or source.is_relative_to(home):
+            raise InspectionUnknownError(
+                f"The inspection home {home} and source {source} are inside one another. "
+                "Set INSPECT_PYTHON_HOME to a folder separate from the repository and its environment."
+            )
 
 
 def run_installer(lock_fd: int, *options: str) -> subprocess.CompletedProcess[str]:
@@ -200,23 +187,17 @@ def require_inspector_installed(lock_fd: int) -> None:
         if result.returncode:
             raise InspectionUnknownError(f"Could not prepare PyCharm build {PYCHARM_BUILD}: {result.stderr.strip()}")
         say(f"using PyCharm build {PYCHARM_BUILD}")
-    for required in (INSPECTOR, TYPESHED_STDLIB):
-        if not required.exists():
-            raise InspectionUnknownError(
-                f"The selected PyCharm application is incomplete: {required} is missing. "
-                "Set INSPECT_PYTHON_PYCHARM to the PyCharm application."
-            )
+    if not INSPECTOR.is_file():
+        raise InspectionUnknownError(
+            f"The selected PyCharm application is missing {INSPECTOR}. Set INSPECT_PYTHON_PYCHARM to the PyCharm application."
+        )
 
 
-def read_interpreter(repository: Path) -> Interpreter:
-    interpreter = repository / ".venv" / "bin" / "python"
-    if not interpreter.exists():
-        raise InspectionUnknownError(f"{repository} has no interpreter at {interpreter}. Run `uv sync` there, then inspect again.")
-    result = run_quietly([interpreter, "-c", INTERPRETER_FACTS], repository)
-    if result.returncode != 0:
-        raise InspectionUnknownError(f"Could not ask {interpreter} for its library folders: {result.stderr.strip()}")
-    facts = json.loads(result.stdout)
-    return Interpreter(interpreter, facts["version"], [Path(root) for root in facts["roots"]])
+def python_version(interpreter: Path) -> str:
+    result = run_quietly([interpreter, "-I", "-B", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], INSPECTED_PROJECT)
+    if result.returncode:
+        raise InspectionUnknownError(f"Could not read the Python version from {interpreter}: {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 @contextmanager
@@ -262,17 +243,24 @@ def require_planted_folder_free(files: list[str]) -> None:
         raise InspectionUnknownError(f"The repository has its own {PLANTED_FOLDER} folder, which this tool needs for its proofs.")
 
 
-def copy_project(repository: Path, files: list[str]) -> str:
+def copy_project(repository: Path, files: list[str]) -> Path:
+    environment = repository / ".venv"
+    private_env = INSPECTED_PROJECT / ".venv"
     try:
-        shutil.rmtree(INSPECTED_PROJECT, ignore_errors=True)
-        copy_files(repository, files, INSPECTED_PROJECT)
+        if INSPECTED_PROJECT.is_symlink():
+            INSPECTED_PROJECT.unlink()
+        elif INSPECTED_PROJECT.exists():
+            shutil.rmtree(INSPECTED_PROJECT)
+        copy_files(repository, [file for file in files if not file.startswith(".venv/")], INSPECTED_PROJECT)
         copy_files(PROOF_SOURCES, planted_files(), INSPECTED_PROJECT / PLANTED_FOLDER)
         set_sql_dialect_if_unset(INSPECTED_PROJECT)
-        return project_interpreter_name(INSPECTED_PROJECT)
-    except (OSError, ElementTree.ParseError) as error:
-        raise InspectionUnknownError(
-            f"Could not copy {repository} into {INSPECTED_PROJECT} for PyCharm to inspect: {error}"
-        ) from error
+        private_env.mkdir()
+        for part in environment.iterdir():
+            # Preserve interpreter launchers; installed package files must be private even when uv linked them.
+            part.resolve().copy(private_env / part.name, follow_symlinks=part.name != "bin", preserve_metadata=True)
+    except OSError as error:
+        raise InspectionUnknownError(f"Could not copy {repository} and its environment into {INSPECTED_PROJECT}: {error}") from error
+    return private_env / "bin" / "python"
 
 
 def copy_files(source: Path, files: list[str], destination: Path) -> None:
@@ -290,13 +278,13 @@ def write_run_settings(python_version: str) -> tuple[Path, Path]:
 
 def forget_earlier_inspections() -> None:
     try:
+        (INSPECTOR_OPTIONS / "jdk.table.xml").unlink(missing_ok=True)
         shutil.rmtree(INSPECTOR_CACHES)
     except FileNotFoundError:
         return
     except OSError as error:
         raise InspectionUnknownError(
-            f"Could not clear PyCharm's caches in {INSPECTOR_CACHES}, so this run could reuse a broken project state: {error}. "
-            "Remove that folder by hand, then run again."
+            f"Could not reset PyCharm's private interpreters and caches in {INSPECTOR_HOME}: {error}."
         ) from error
 
 
@@ -309,36 +297,6 @@ def trust_projects(projects: tuple[Path, ...]) -> None:
     )
 
 
-def register_interpreter(names: set[str], interpreter: Interpreter) -> None:
-    roots = "".join(f'<root url={quoteattr(root.as_uri())} type="simple" />' for root in [*interpreter.roots, TYPESHED_STDLIB])
-    jdks = "".join(
-        f'<jdk version="2"><name value={quoteattr(name)} /><type value="Python SDK" />'
-        f"<homePath value={quoteattr(str(interpreter.executable))} />"
-        f'<roots><classPath><root type="composite">{roots}</root></classPath>'
-        '<sourcePath><root type="composite" /></sourcePath></roots></jdk>'
-        for name in sorted(names)
-    )
-    INSPECTOR_OPTIONS.mkdir(parents=True, exist_ok=True)
-    (INSPECTOR_OPTIONS / "jdk.table.xml").write_text(
-        f'<application><component name="ProjectJdkTable">{jdks}</component></application>\n'
-    )
-
-
-def project_interpreter_name(project: Path) -> str:
-    settings_file = project / ".idea" / "misc.xml"
-    settings = ElementTree.parse(settings_file).getroot() if settings_file.exists() else ElementTree.Element("project", version="4")  # noqa: S314
-    root_manager = settings.find("component[@name='ProjectRootManager']")
-    if root_manager is None:
-        root_manager = ElementTree.SubElement(settings, "component", name="ProjectRootManager", version="2")
-    if (name := root_manager.get("project-jdk-name")) is not None:
-        return name
-    root_manager.set("project-jdk-name", DEFAULT_INTERPRETER_NAME)
-    root_manager.set("project-jdk-type", "Python SDK")
-    settings_file.parent.mkdir(exist_ok=True)
-    ElementTree.ElementTree(settings).write(settings_file, encoding="UTF-8", xml_declaration=True)
-    return DEFAULT_INTERPRETER_NAME
-
-
 def set_sql_dialect_if_unset(project: Path) -> None:
     dialects = project / ".idea" / "sqldialects.xml"
     if not dialects.exists():
@@ -346,21 +304,21 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
-def inspect_copy(repository: Path, files: list[str], interpreter: Interpreter, lock_fd: int) -> list[Finding]:
-    interpreter_name = copy_project(repository, files)
+def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Finding]:
+    interpreter = copy_project(repository, files)
     try:
         trust_projects((INSPECTED_PROJECT,))
-        register_interpreter({interpreter_name}, interpreter)
-        profile, properties = write_run_settings(interpreter.version)
+        profile, properties = write_run_settings(python_version(interpreter))
     except OSError as error:
-        raise InspectionUnknownError(f"Could not write PyCharm's settings into {INSPECTOR_HOME}: {error}") from error
-    return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, properties, lock_fd)
+        raise InspectionUnknownError(f"Could not prepare PyCharm to inspect {INSPECTED_PROJECT}: {error}") from error
+    settings = {"PYCHARM_PROPERTIES": str(properties), "PYCHARM_PYTHON_PATH": str(interpreter), "PYTHONDONTWRITEBYTECODE": "1"}
+    return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, settings, lock_fd)
 
 
-def run_inspector(project: Path, expected: list[str], profile: Path, properties: Path, lock_fd: int) -> list[Finding]:
+def run_inspector(project: Path, expected: list[str], profile: Path, settings: dict[str, str], lock_fd: int) -> list[Finding]:
     with tempfile.TemporaryDirectory() as output:
         command = [INSPECTOR, project, profile, output, "-v2", "-format", "json"]
-        result = run_quietly(command, INSPECTOR_HOME, {"PYCHARM_PROPERTIES": str(properties)}, pass_fds=(lock_fd,))
+        result = run_quietly(command, INSPECTOR_HOME, settings, pass_fds=(lock_fd,))
         if result.returncode != 0:
             last_lines = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
             raise InspectionUnknownError(f"PyCharm's inspector exited {result.returncode} on {project}:\n{last_lines}")
@@ -398,7 +356,10 @@ def is_repository_finding(finding: Finding, repository: Path) -> bool:
 
 def inspect_repository(repository: Path) -> list[Finding]:
     require_home_apart_from(repository)
-    interpreter = read_interpreter(repository)
+    if not (repository / ".venv" / "bin" / "python").is_file():
+        raise InspectionUnknownError(
+            f"{repository} has no interpreter at .venv/bin/python. Run `uv sync` there, then inspect again."
+        )
     files = repository_files(repository)
     require_planted_folder_free(files)
     with exclusive_inspector_home() as lock_fd:
@@ -406,7 +367,7 @@ def inspect_repository(repository: Path) -> list[Finding]:
         forget_earlier_inspections()
         install_plugins_into_new_home()
         say(f"inspecting {len(files)} files of {repository.name} with {len(PROOFS)} planted mistakes")
-        findings = inspect_copy(repository, files, interpreter, lock_fd)
+        findings = inspect_copy(repository, files, lock_fd)
         require_proofs_caught(findings)
         if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
             cleanup = run_installer(lock_fd, "--retire-others")

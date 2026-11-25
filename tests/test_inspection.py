@@ -1,6 +1,8 @@
 import json
 import shutil
 import sys
+import sysconfig
+import venv
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -23,7 +25,7 @@ from python_inspection.inspection import (
 MAPPER_GUARD = "io.github.mwassong.mapper-guard"
 ONE_INSPECTION_INDEX = json.dumps({"groups": [{"name": "Python", "inspections": [{"shortName": "PyTypeChecker"}]}]})
 FAKE_INSPECTOR = """#!{python}
-import json, os, pathlib, sys, time
+import json, os, pathlib, subprocess, sys, time
 project, output = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[3])
 settings = dict(line.split("=", 1) for line in pathlib.Path(os.environ["PYCHARM_PROPERTIES"]).read_text().splitlines())
 disabled_list = pathlib.Path(settings["idea.config.path"]) / "disabled_plugins.txt"
@@ -32,7 +34,9 @@ loaded = {{plugin.name for plugin in pathlib.Path(settings["idea.plugins.path"])
 with pathlib.Path({calls!r}).open("a") as calls:
     calls.write(project.name + "\\n")
 time.sleep({seconds})
-files = [file.relative_to(project).as_posix() for file in project.rglob("*") if file.is_file() and ".idea" not in file.parts]
+if (project / "verify_environment.py").exists():
+    subprocess.run([os.environ["PYCHARM_PYTHON_PATH"], "-I", "-B", project / "verify_environment.py"], check=True)
+files = [file.relative_to(project).as_posix() for file in project.rglob("*") if file.is_file() and ".venv" not in file.parts]
 print("".join(f"Analyzing code in …/{{file}}\\n" for file in files))
 problems = [
     dict(file=path if path.startswith("/") else "file://$PROJECT_DIR$/" + path, line=line,
@@ -93,8 +97,7 @@ def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: i
         app = home / "PyCharm.app"
         monkeypatch.setenv("INSPECT_PYTHON_PYCHARM", str(app))
     pycharm, calls = app / "Contents", home / "inspector-calls"
-    (pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib").mkdir(parents=True)
-    (pycharm / "bin").mkdir()
+    (pycharm / "bin").mkdir(parents=True)
     script = FAKE_INSPECTOR.format(
         python=sys.executable, calls=str(calls), seconds=seconds, reports=str(home / "reports.json"), index=ONE_INSPECTION_INDEX
     )
@@ -105,7 +108,6 @@ def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: i
     paths = {
         "PYCHARM": app,
         "INSPECTOR": pycharm / "bin" / "inspect.sh",
-        "TYPESHED_STDLIB": pycharm / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib",
         "INSPECTOR_HOME": inspector_home,
         "INSPECTOR_PLUGINS": inspector_home / "plugins",
         "INSPECTOR_OPTIONS": inspector_home / "config" / "options",
@@ -121,8 +123,7 @@ def make_repository(path: Path, files: dict[str, str]) -> Path:
     for name, text in files.items():
         (path / name).parent.mkdir(parents=True, exist_ok=True)
         (path / name).write_text(text)
-    (path / ".venv" / "bin").mkdir(parents=True)
-    (path / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    venv.EnvBuilder(symlinks=True).create(path / ".venv")
     (path / ".gitignore").write_text(".venv/\n")
     assert inspection.run_quietly(["git", "init", "-q"], path).returncode == 0
     return path
@@ -137,7 +138,7 @@ def answer_unknown() -> str:
     with redirect_stderr(errors):
         exit_code = inspection.main()
     assert exit_code == 2
-    assert errors.getvalue().startswith("UNKNOWN:")
+    assert any(line.startswith("UNKNOWN:") for line in errors.getvalue().splitlines())
     return errors.getvalue()
 
 
@@ -220,14 +221,69 @@ def test_a_report_at_a_path_the_tool_did_not_ask_about_answers_unknown(tmp_path:
         inspection.inspect_repository(repository)
 
 
-def test_a_run_writes_nothing_into_the_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("linked_venv", [False, True])
+def test_the_inspector_uses_a_private_copy_of_the_installed_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked_venv: bool
+) -> None:
     install_fake_pycharm(tmp_path, monkeypatch)
-    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n", "queries.py": "SQL = 'select 1'\n"})
+    receipt = tmp_path / "dependency-path"
+    settings = '<project version="4"><component name="Black"><option name="enabled" value="true" /></component></project>'
+    repository = make_repository(
+        tmp_path / "repo",
+        {
+            ".idea/misc.xml": settings,
+            "verify_environment.py": (
+                "from pathlib import Path\n"
+                "import catalog_fixture_dependency as dep\n"
+                "assert dep.answer == 42\n"
+                "package = Path(dep.__file__)\n"
+                "package.write_text('answer = 7\\n')\n"
+                f"Path({str(receipt)!r}).write_text(str(package))\n"
+            ),
+        },
+    )
+    assert inspection.run_quietly(["git", "add", "--force", ".idea/misc.xml"], repository).returncode == 0
+    env = repository / ".venv"
+    if linked_venv:
+        env = env.rename(tmp_path / "linked-env")
+        (repository / ".venv").symlink_to(env, target_is_directory=True)
+    packages = Path(sysconfig.get_path("purelib", vars={"base": str(env), "platbase": str(env)}))
+    package = packages / "catalog_fixture_dependency.py"
+    if linked_venv:
+        package.symlink_to(repository / "editable_source.py")
+    package.write_text("answer = 42\n")
+    (packages / "load_dependency.pth").write_text("import catalog_fixture_dependency\n")
     before = tree(repository)
+    environment_before = tree(env)
 
     inspection.inspect_repository(repository)
 
+    inspected = Path(receipt.read_text())
+    assert inspected.is_relative_to(inspection.INSPECTOR_HOME)
+    assert inspected.read_text() == "answer = 7\n"
+    assert package.read_text() == "answer = 42\n"
+    assert tree(env) == environment_before
     assert tree(repository) == before
+    assert (inspection.INSPECTED_PROJECT / ".idea" / "misc.xml").read_text() == settings
+
+
+@pytest.mark.parametrize("disposable", ["project", "system"])
+def test_a_linked_source_environment_inside_the_inspection_home_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disposable: str
+) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    env = repository / ".venv"
+    parent = inspection.INSPECTOR_HOME / disposable
+    parent.mkdir()
+    stored = env.rename(parent / "source-venv")
+    env.symlink_to(stored, target_is_directory=True)
+    before = tree(stored)
+
+    with pytest.raises(InspectionUnknownError):
+        inspection.inspect_repository(repository)
+
+    assert tree(stored) == before
 
 
 def test_an_inspector_that_never_finishes_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,9 +373,13 @@ def test_missing_pycharm_answers_unknown(tmp_path: Path, monkeypatch: pytest.Mon
     assert "INSPECT_PYTHON_PYCHARM" in answer_unknown()
 
 
-def test_a_repository_without_an_interpreter_answers_unknown(tmp_path: Path) -> None:
-    with pytest.raises(InspectionUnknownError, match="uv sync"):
-        inspection.read_interpreter(tmp_path)
+def test_a_repository_without_an_interpreter_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_pycharm(tmp_path, monkeypatch)
+    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
+    (repository / ".venv" / "bin" / "python").unlink()
+    monkeypatch.chdir(repository)
+
+    assert "uv sync" in answer_unknown()
 
 
 def test_caches_that_cannot_be_cleared_answer_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -327,6 +387,7 @@ def test_caches_that_cannot_be_cleared_answer_unknown(tmp_path: Path, monkeypatc
     (caches / "index").mkdir(parents=True)
     (caches / "index" / "stale").touch()
     monkeypatch.setattr(inspection, "INSPECTOR_CACHES", caches)
+    monkeypatch.setattr(inspection, "INSPECTOR_OPTIONS", tmp_path / "options")
     (caches / "index").chmod(0o500)
     try:
         with pytest.raises(InspectionUnknownError):
@@ -360,31 +421,6 @@ def test_a_failed_plugin_download_leaves_no_plugins_folder_behind(tmp_path: Path
 def test_planted_proofs_in_this_checkout_stay_out_of_its_own_findings() -> None:
     assert inspection.is_planted(PROOF_SOURCES / "canary.py")
     assert not inspection.is_planted(PROOF_SOURCES.parent / "inspection.py")
-
-
-def test_existing_project_settings_keep_their_interpreter_and_other_settings(tmp_path: Path) -> None:
-    settings = tmp_path / ".idea" / "misc.xml"
-    settings.parent.mkdir()
-    original = (
-        '<project version="4"><component name="Black"><option name="enabled" value="true" /></component>'
-        '<component name="ProjectRootManager" version="2" project-jdk-name="uv (app)" project-jdk-type="Python SDK" />'
-        "</project>"
-    )
-    settings.write_text(original)
-
-    assert inspection.project_interpreter_name(tmp_path) == "uv (app)"
-    assert settings.read_text() == original
-
-
-def test_project_settings_without_an_interpreter_gain_one_and_keep_the_rest(tmp_path: Path) -> None:
-    settings = tmp_path / ".idea" / "misc.xml"
-    settings.parent.mkdir()
-    settings.write_text('<project version="4"><component name="Black"><option name="enabled" value="true" /></component></project>')
-
-    name = inspection.project_interpreter_name(tmp_path)
-
-    assert inspection.project_interpreter_name(tmp_path) == name
-    assert 'name="Black"' in settings.read_text()
 
 
 def test_a_checked_in_sql_dialect_is_kept(tmp_path: Path) -> None:
