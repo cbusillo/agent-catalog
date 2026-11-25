@@ -310,11 +310,11 @@ def test_a_finding_reaches_the_output_and_fails_the_command(monkeypatch: pytest.
 
 
 def test_missing_pycharm_answers_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("INSPECT_PYTHON_PYCHARM", str(tmp_path))
+    install_fake_pycharm(tmp_path, monkeypatch)
     monkeypatch.setattr(inspection, "INSPECTOR", tmp_path / "inspect.sh")
+    monkeypatch.chdir(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
 
-    with pytest.raises(InspectionUnknownError, match="INSPECT_PYTHON_PYCHARM"):
-        inspection.require_inspector_installed()
+    assert "INSPECT_PYTHON_PYCHARM" in answer_unknown()
 
 
 def test_a_repository_without_an_interpreter_answers_unknown(tmp_path: Path) -> None:

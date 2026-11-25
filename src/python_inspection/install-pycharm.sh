@@ -46,9 +46,10 @@ cleanup() (
     shopt -s dotglob nullglob
     for part in "$work"/*; do
         case "${part##*/}" in
-            release.json|vendor.sha256|PyCharm.dmg|PyCharm.app|mount) ;;
-            *) echo "Unexpected item in PyCharm staging: $part" >&2; return 1 ;;
+            release.json|vendor.sha256|PyCharm.dmg) [[ -f $part && ! -L $part ]] && continue ;;
+            PyCharm.app|mount) [[ -d $part && ! -L $part ]] && continue ;;
         esac
+        echo "Unexpected item in PyCharm staging: $part" >&2; return 1
     done
     if [[ -e $work/mount || -L $work/mount ]]; then
         if ! rmdir "$work/mount" 2>/dev/null; then
