@@ -53,6 +53,9 @@ jobs:
           cd "$INSPECT_PYTHON_HOME/project"
           .venv/bin/python -IB -c 'from pathlib import Path; import clean_project; assert Path(clean_project.__file__).resolve().is_relative_to(Path.cwd())'
           cd "$RUNNER_TEMP/clean-project"
+          mkdir -p .idea
+          cp "$INSPECT_PYTHON_HOME/project/.idea/modules.xml" "$INSPECT_PYTHON_HOME"/project/.idea/*.iml .idea/
+          git add --force .idea/modules.xml .idea/*.iml
           uv remove --no-sync docker
           .venv/bin/python -IB -c 'from docker.errors import DockerException'
           status=0
