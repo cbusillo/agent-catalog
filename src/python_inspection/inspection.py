@@ -264,7 +264,7 @@ def copy_project(repository: Path, files: list[str]) -> Path:
         copy_files(repository, [file for file in files if not file.startswith(".venv/")], INSPECTED_PROJECT)
         copy_files(PROOF_SOURCES, planted_files(), INSPECTED_PROJECT / PLANTED_FOLDER)
         set_sql_dialect_if_unset(INSPECTED_PROJECT)
-        exclude_environment_from_inspection(INSPECTED_PROJECT)
+        configure_plain_project(INSPECTED_PROJECT)
         copy_environment(environment, private_env)
     except OSError as error:
         raise InspectionUnknownError(f"Could not copy {repository} and its environment into {INSPECTED_PROJECT}: {error}") from error
@@ -312,11 +312,11 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
-def exclude_environment_from_inspection(project: Path) -> None:
+def configure_plain_project(project: Path) -> None:
     modules = project / ".idea" / "modules.xml"
-    if modules.exists():
+    if modules.exists() or ((project / "pyproject.toml").is_file() and (project / "uv.lock").is_file()):
         return
-    # On the first inspection PyCharm can scan site-packages before its automatic module excludes .venv.
+    # A bare directory can finish its first inspection before PyCharm assigns its interpreter.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".iml", dir=modules.parent, delete=False) as module:
         module.write(
             '<module type="PYTHON_MODULE" version="4"><component name="NewModuleRootManager">'
@@ -365,7 +365,7 @@ def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Findi
 
 def run_inspector(project: Path, expected: list[str], profile: Path, settings: dict[str, str], lock_fd: int) -> list[Finding]:
     with tempfile.TemporaryDirectory() as output:
-        command = [INSPECTOR, project, profile, output, "-v2", "-format", "json"]
+        command = [INSPECTOR, project, profile, output, "-v2", "-format", "json", "-scope", "!file:.venv//*"]
         result = run_quietly(command, INSPECTOR_HOME, settings, pass_fds=(lock_fd,))
         if result.returncode != 0:
             last_lines = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
