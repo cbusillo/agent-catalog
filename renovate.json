@@ -1,5 +1,21 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", "schedule:weekly"],
-  "lockFileMaintenance": { "enabled": true }
+  "lockFileMaintenance": { "enabled": true },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["src/python_inspection/inspection.py"],
+      "matchStrings": ["PYCHARM_BUILD = \"(?<currentValue>[0-9]+(?:\\.[0-9]+)+)\""],
+      "depNameTemplate": "PyCharm",
+      "datasourceTemplate": "custom.pycharm",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "customDatasources": {
+    "pycharm": {
+      "defaultRegistryUrlTemplate": "https://data.services.jetbrains.com/products/releases?code=PCP&type=release&latest=false",
+      "transformTemplates": ["{\"releases\": [PCP.{\"version\": build}]}"]
+    }
+  }
 }

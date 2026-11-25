@@ -17,8 +17,9 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import quoteattr
 
 PACKAGE = Path(__file__).resolve().parent
-PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM", Path.home() / "Applications" / "PyCharm.app"))
-INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python"))
+PYCHARM_BUILD = "263.8311.32"
+INSPECTOR_HOME = Path(os.environ.get("INSPECT_PYTHON_HOME", Path.home() / ".cache" / "inspect-python")).resolve()
+PYCHARM = Path(os.environ.get("INSPECT_PYTHON_PYCHARM") or INSPECTOR_HOME / "ides" / PYCHARM_BUILD / "PyCharm.app")
 INSPECTOR = PYCHARM / "Contents" / "bin" / "inspect.sh"
 TYPESHED_STDLIB = PYCHARM / "Contents" / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 INSPECTOR_PLUGINS = INSPECTOR_HOME / "plugins"
@@ -133,13 +134,16 @@ def unanalyzed_files(expected: list[str], inspector_log: str) -> list[str]:
     return [file for file in expected if file not in analyzed]
 
 
-def run_quietly(command: list[str | Path], cwd: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_quietly(
+    command: list[str | Path], cwd: Path, extra_env: dict[str, str] | None = None, *, pass_fds: tuple[int, ...] = ()
+) -> subprocess.CompletedProcess[str]:
     env = os.environ | (extra_env or {})
     try:
         return subprocess.run(  # noqa: S603 commands are this tool's own
             command,
             cwd=cwd,
             env=env,
+            pass_fds=pass_fds,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -175,11 +179,31 @@ def require_home_apart_from(repository: Path) -> None:
         )
 
 
-def require_inspector_installed() -> None:
+def run_installer(lock_fd: int, *options: str) -> subprocess.CompletedProcess[str]:
+    # The installer handles stalled downloads and unmounts the disk image on exit.
+    return subprocess.run(  # noqa: S603 the packaged installer manages the build in this home
+        ["/bin/bash", PACKAGE / "install-pycharm.sh", PYCHARM_BUILD, PYCHARM, *options],
+        cwd=INSPECTOR_HOME,
+        pass_fds=(lock_fd,),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def require_inspector_installed(lock_fd: int) -> None:
+    if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
+        if not PYCHARM.exists():
+            say(f"downloading PyCharm build {PYCHARM_BUILD}")
+        result = run_installer(lock_fd)
+        if result.returncode:
+            raise InspectionUnknownError(f"Could not prepare PyCharm build {PYCHARM_BUILD}: {result.stderr.strip()}")
+        say(f"using PyCharm build {PYCHARM_BUILD}")
     for required in (INSPECTOR, TYPESHED_STDLIB):
         if not required.exists():
             raise InspectionUnknownError(
-                f"PyCharm 2026.3 is not where this tool looks for it: {required} is missing. "
+                f"The selected PyCharm application is incomplete: {required} is missing. "
                 "Set INSPECT_PYTHON_PYCHARM to the PyCharm application."
             )
 
@@ -196,7 +220,7 @@ def read_interpreter(repository: Path) -> Interpreter:
 
 
 @contextmanager
-def exclusive_inspector_home() -> Generator[None]:
+def exclusive_inspector_home() -> Generator[int]:
     try:
         INSPECTOR_HOME.mkdir(parents=True, exist_ok=True)
         lock = (INSPECTOR_HOME / "inspection.lock").open("w")
@@ -209,7 +233,8 @@ def exclusive_inspector_home() -> Generator[None]:
             raise InspectionUnknownError(
                 f"Another inspection is using {INSPECTOR_HOME}. Wait for it to finish, then run again."
             ) from error
-        yield
+        # A child using the home keeps its lock if the calling process dies.
+        yield lock.fileno()
 
 
 def install_plugins_into_new_home() -> None:
@@ -321,7 +346,7 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
-def inspect_copy(repository: Path, files: list[str], interpreter: Interpreter) -> list[Finding]:
+def inspect_copy(repository: Path, files: list[str], interpreter: Interpreter, lock_fd: int) -> list[Finding]:
     interpreter_name = copy_project(repository, files)
     try:
         trust_projects((INSPECTED_PROJECT,))
@@ -329,13 +354,13 @@ def inspect_copy(repository: Path, files: list[str], interpreter: Interpreter) -
         profile, properties = write_run_settings(interpreter.version)
     except OSError as error:
         raise InspectionUnknownError(f"Could not write PyCharm's settings into {INSPECTOR_HOME}: {error}") from error
-    return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, properties)
+    return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, properties, lock_fd)
 
 
-def run_inspector(project: Path, expected: list[str], profile: Path, properties: Path) -> list[Finding]:
+def run_inspector(project: Path, expected: list[str], profile: Path, properties: Path, lock_fd: int) -> list[Finding]:
     with tempfile.TemporaryDirectory() as output:
         command = [INSPECTOR, project, profile, output, "-v2", "-format", "json"]
-        result = run_quietly(command, INSPECTOR_HOME, {"PYCHARM_PROPERTIES": str(properties)})
+        result = run_quietly(command, INSPECTOR_HOME, {"PYCHARM_PROPERTIES": str(properties)}, pass_fds=(lock_fd,))
         if result.returncode != 0:
             last_lines = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
             raise InspectionUnknownError(f"PyCharm's inspector exited {result.returncode} on {project}:\n{last_lines}")
@@ -362,9 +387,8 @@ def require_proofs_caught(findings: list[Finding]) -> None:
     if failed:
         raise InspectionUnknownError(
             f"These checks did not catch their planted mistake in {PLANTED_FOLDER}, so a clean answer would be false: "
-            f"{', '.join(failed)}. Look in {INSPECTOR_HOME / 'log' / 'idea.log'}. A plugin that is missing or disabled in "
-            f"{INSPECTOR_HOME} fails its proof, and deleting that folder reinstalls the plugins; ShellCheck needs the "
-            "shellcheck program on the PATH."
+            f"{', '.join(failed)}. Look in {INSPECTOR_HOME / 'log' / 'idea.log'} and check that the plugins are enabled. "
+            f"To reinstall the plugin files, remove {INSPECTOR_PLUGINS}. ShellCheck needs shellcheck on the PATH."
         )
 
 
@@ -374,16 +398,22 @@ def is_repository_finding(finding: Finding, repository: Path) -> bool:
 
 def inspect_repository(repository: Path) -> list[Finding]:
     require_home_apart_from(repository)
-    require_inspector_installed()
     interpreter = read_interpreter(repository)
     files = repository_files(repository)
     require_planted_folder_free(files)
-    with exclusive_inspector_home():
+    with exclusive_inspector_home() as lock_fd:
+        require_inspector_installed(lock_fd)
         forget_earlier_inspections()
         install_plugins_into_new_home()
         say(f"inspecting {len(files)} files of {repository.name} with {len(PROOFS)} planted mistakes")
-        findings = inspect_copy(repository, files, interpreter)
-    require_proofs_caught(findings)
+        findings = inspect_copy(repository, files, interpreter, lock_fd)
+        require_proofs_caught(findings)
+        if not os.environ.get("INSPECT_PYTHON_PYCHARM"):
+            cleanup = run_installer(lock_fd, "--retire-others")
+            if cleanup.stdout:
+                say(cleanup.stdout.strip())
+            if cleanup.returncode:
+                say(f"Could not finish removing old PyCharm builds: {cleanup.stderr.strip()}")
     return [finding for finding in findings if is_repository_finding(finding, repository)]
 
 
