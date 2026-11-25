@@ -2,6 +2,7 @@ import fcntl
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -113,10 +114,20 @@ def require_inspections_listed(index: Path) -> None:
         raise InspectionUnknownError(f"PyCharm's results index {index} lists no inspections, so it checked nothing.")
 
 
-def unanalyzed_files(expected: list[str], inspector_log: str) -> list[str]:
-    analyzed = {
-        line.removeprefix(ANALYZED_LINE_PREFIX) for line in inspector_log.splitlines() if line.startswith(ANALYZED_LINE_PREFIX)
-    }
+def unanalyzed_files(expected: list[str], inspector_log: str, project: Path) -> list[str]:
+    analyzed: set[str] = set()
+    for line in inspector_log.splitlines():
+        if not line.startswith(ANALYZED_LINE_PREFIX):
+            continue
+        name = line.removeprefix(ANALYZED_LINE_PREFIX)
+        if name.endswith("]") and " [" in name:
+            # In a multi-module project the IDE appends an unescaped ' [module]' to the file name.
+            candidates = [name, *(name[: match.start()] for match in re.finditer(r" \[", name))]
+            matches = [candidate for candidate in candidates if (project / candidate).is_file()]
+            if len(matches) != 1:
+                continue
+            name = matches[0]
+        analyzed.add(name)
     return [file for file in expected if file not in analyzed]
 
 
@@ -380,7 +391,7 @@ def run_inspector(project: Path, expected: list[str], profile: Path, settings: d
         configuration = {file for file in expected if is_project_setting(file)}
         if configuration:
             say(f"copied as project settings: {', '.join(sorted(configuration))}")
-        missing = unanalyzed_files([file for file in expected if file not in configuration], result.stdout)
+        missing = unanalyzed_files([file for file in expected if file not in configuration], result.stdout, project)
         if missing:
             raise InspectionUnknownError(f"PyCharm finished {project} without analyzing: {', '.join(missing)}")
         findings = read_findings(Path(output))

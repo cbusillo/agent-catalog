@@ -369,10 +369,13 @@ def test_a_report_that_is_not_json_answers_unknown_naming_it(tmp_path: Path) -> 
         read_findings(tmp_path)
 
 
-def test_a_file_the_inspector_skipped_is_reported() -> None:
-    inspector_log = "Analyzing code in …/src/seen.py\n"
+def test_module_annotations_prove_only_unambiguous_files(tmp_path: Path) -> None:
+    files = ["seen.py", "name [literal]", "both", "both [module]", "skipped.py"]
+    for name in files:
+        (tmp_path / name).touch()
+    log = "\n".join(f"Analyzing code in …/{name}" for name in ("seen.py [nested [module]]", "name [literal]", "both [module]"))
 
-    assert unanalyzed_files(["src/seen.py", "deploy/compose.yaml"], inspector_log) == ["deploy/compose.yaml"]
+    assert unanalyzed_files(files, log, tmp_path) == ["both", "both [module]", "skipped.py"]
 
 
 def test_every_proof_names_a_planted_file_and_line() -> None:
