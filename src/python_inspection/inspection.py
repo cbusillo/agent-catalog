@@ -382,9 +382,8 @@ def require_proofs_caught(findings: list[Finding]) -> None:
     if failed:
         raise InspectionUnknownError(
             f"These checks did not catch their planted mistake in {PLANTED_FOLDER}, so a clean answer would be false: "
-            f"{', '.join(failed)}. Look in {INSPECTOR_HOME / 'log' / 'idea.log'}. A plugin that is missing or disabled in "
-            f"{INSPECTOR_HOME} fails its proof, and deleting that folder reinstalls the plugins; ShellCheck needs the "
-            "shellcheck program on the PATH."
+            f"{', '.join(failed)}. Look in {INSPECTOR_HOME / 'log' / 'idea.log'} and check that the plugins are enabled. "
+            f"To reinstall the plugin files, remove {INSPECTOR_PLUGINS}. ShellCheck needs shellcheck on the PATH."
         )
 
 

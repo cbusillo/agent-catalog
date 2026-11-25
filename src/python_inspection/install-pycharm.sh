@@ -17,14 +17,15 @@ check_app() {
 }
 
 if [[ ${3:-} == --retire-others ]]; then
-    if [[ $app != "$PWD/ides/$build/PyCharm.app" || -L $PWD/ides || -L ${app%/*} || -L $app ]]; then
+    if [[ ! $app -ef "$PWD/ides/$build/PyCharm.app" || -L $PWD/ides || -L ${app%/*} || -L $app || -L $PWD/system ]]; then
+        echo "Leaving earlier builds in place because the selected cache paths are not local to this inspection home."
         exit 0
     fi
     check_app "$app" "$build"
     for previous in "$PWD"/ides/*/PyCharm.app; do
         directory=${previous%/*}
         number=${directory##*/}
-        [[ $previous != "$app" && $number =~ ^[0-9]+(\.[0-9]+)+$ && ! -L $directory && ! -L $previous ]] || continue
+        [[ $number != "$build" && $number =~ ^[0-9]+(\.[0-9]+)+$ && ! -L $directory && ! -L $previous ]] || continue
         check_app "$previous" "$number" 2>/dev/null || continue
         # The next inspection clears system even if removal is interrupted after the rename.
         mkdir -p system
@@ -37,6 +38,30 @@ if [[ ${3:-} == --retire-others ]]; then
     exit 0
 fi
 
+work="$PWD/.pycharm-install"
+cleanup() (
+    [[ -e $work || -L $work ]] || return 0
+    [[ -d $work && ! -L $work && $(stat -f %d "$work") == "$(stat -f %d "${work%/*}")" ]] ||
+        { echo "Unexpected staging path: $work" >&2; return 1; }
+    shopt -s dotglob nullglob
+    for part in "$work"/*; do
+        case "${part##*/}" in
+            release.json|vendor.sha256|PyCharm.dmg|PyCharm.app|mount) ;;
+            *) echo "Unexpected item in PyCharm staging: $part" >&2; return 1 ;;
+        esac
+    done
+    if [[ -e $work/mount || -L $work/mount ]]; then
+        if ! rmdir "$work/mount" 2>/dev/null; then
+            hdiutil info -plist | plutil -convert json -o - - | jq -e --arg work "$work" \
+                'any(.images[]; ."image-path" == ($work + "/PyCharm.dmg") and any(."system-entities"[]; ."mount-point" == ($work + "/mount")))' >/dev/null ||
+                { echo "Unrecognized mount or content at $work/mount." >&2; return 1; }
+            hdiutil detach "$work/mount" >&2 || return 1
+            if [[ -e $work/mount ]]; then rmdir "$work/mount" || return 1; fi
+        fi
+    fi
+    rm -rx "$work"
+)
+cleanup
 if [[ -e $app || -L $app ]]; then
     check_app "$app" "$build"
     exit 0
@@ -50,15 +75,8 @@ esac
 
 parent=$(dirname "$app")
 mkdir -p "$parent"
-work=$(mktemp -d "$parent/.pycharm-install.XXXXXX")
-mounted=false
-cleanup() {
-    if "$mounted"; then
-        hdiutil detach "$work/mount" >&2 || hdiutil detach -force "$work/mount" >&2 || return 1
-    fi
-    rm -r "$work"
-}
-trap cleanup EXIT
+mkdir -m 700 "$work"
+trap 'cleanup || exit 1' EXIT
 trap 'exit 1' HUP INT TERM
 cd "$work"
 
@@ -76,7 +94,6 @@ printf '%s  PyCharm.dmg\n' "$checksum" | shasum -a 256 -c - >&2
 
 mkdir mount
 hdiutil attach -readonly -nobrowse -mountpoint "$work/mount" PyCharm.dmg >&2
-mounted=true
 ditto mount/PyCharm.app PyCharm.app
 check_app "$work/PyCharm.app" "$build"
 mv PyCharm.app "$app"

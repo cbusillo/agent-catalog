@@ -10,7 +10,7 @@ uvx --from git+https://github.com/<owner>/agent-catalog@v0.1.0 inspect-python
 
 ## Settings
 
-- On a Mac, the first run downloads the pinned build from JetBrains, verifies its SHA-256 and installs it under `ides/<build>/PyCharm.app` in the inspection home. An update keeps the previous IDE until the new one inspects the project and catches the planted mistakes. Then the inspector removes the other managed builds, even when it found a problem in the project. A failed proof keeps the previous IDE for retry or rollback.
+- On a Mac with `jq` available, the first run downloads the pinned build from JetBrains, verifies its SHA-256 and installs it under `ides/<build>/PyCharm.app` in the inspection home. An update keeps the previous IDE until the new one inspects the project and catches the planted mistakes. Then the inspector removes the other managed builds, even when it found a problem in the project. A failed proof keeps the previous IDE for retry or rollback. Use separate homes if you regularly switch between two pins.
 - Set `INSPECT_PYTHON_PYCHARM` to test a specific application. This leaves the managed IDEs in place.
 - `INSPECT_PYTHON_HOME`: the folder PyCharm uses as its home while inspecting. Default `~/.cache/inspect-python`. It must not be inside the repository or contain it; the tool refuses with `UNKNOWN`.
 
@@ -20,7 +20,7 @@ Renovate checks JetBrains' stable builds weekly. On a pull request, a GitHub-hos
 
 ## What a run does
 
-- When the home has no `plugins` folder, it downloads the adopted plugins from the JetBrains Marketplace at their pinned versions and unpacks them there. The folder appears only once every plugin is unpacked. A home that has one is never changed. To reinstall plugins, delete the home.
+- When the home has no `plugins` folder, it downloads the adopted plugins from the JetBrains Marketplace at their pinned versions and unpacks them there. The folder appears only once every plugin is unpacked. To reinstall the plugin files, remove only `plugins` from the inspection home.
 - It copies the files `git ls-files -z --cached --others --exclude-standard` lists into `project` in the home, and the planted mistakes from `src/python_inspection/proofs` into `inspect-python-planted-mistakes` inside that copy. A repository that has a folder of that name answers `UNKNOWN`. Neither the tool nor PyCharm writes into the repository. A repository's own `.idea/misc.xml` and `.idea/sqldialects.xml` are used when the repository tracks them. Otherwise the copy gets an interpreter name and the PostgreSQL SQL dialect.
 - PyCharm inspects the copy in one launch. Each adopted plugin and built-in check must report its planted mistake at the exact file, line and inspection inside the planted folder, or the answer is `UNKNOWN` naming it. Nothing is remembered between runs: a plugin that is missing or disabled fails its proof on the next run, and on every run after.
 - Every copied file must appear in PyCharm's log as analysed, and PyCharm's results index must list the inspections it ran. A finding at any other path makes the answer `UNKNOWN`. Findings in the planted folder, and in this catalog's own proofs, are never shown as the repository's.

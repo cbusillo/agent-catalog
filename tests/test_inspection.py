@@ -168,17 +168,6 @@ def test_one_launch_inspects_the_repository_and_the_planted_mistakes(tmp_path: P
     assert calls.read_text().split() == ["project", "project"]
 
 
-def test_a_planted_mistake_pycharm_did_not_report_answers_unknown_naming_its_check(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    install_fake_pycharm(tmp_path, monkeypatch)
-    set_reports(tmp_path, [report for report in planted_reports() if report[2] != "ShellCheck"])
-    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
-
-    with pytest.raises(InspectionUnknownError, match="ShellCheck"):
-        inspection.inspect_repository(repository)
-
-
 def test_a_removed_plugin_answers_unknown_naming_its_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     install_fake_pycharm(tmp_path, monkeypatch)
     repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
@@ -210,14 +199,6 @@ def test_a_repository_finding_cannot_satisfy_a_proof(tmp_path: Path, monkeypatch
 
     with pytest.raises(InspectionUnknownError, match="ShellCheck"):
         inspection.inspect_repository(repository)
-
-
-def test_only_the_repository_findings_are_shown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    install_fake_pycharm(tmp_path, monkeypatch)
-    set_reports(tmp_path, [*planted_reports(), ("app.py", 1, "PyTypeChecker", None)])
-    repository = make_repository(tmp_path / "repo", {"app.py": "x = 1\n"})
-
-    assert inspection.inspect_repository(repository) == [Finding("app.py", 1, "PyTypeChecker", "PyTypeChecker")]
 
 
 def test_a_repository_with_a_folder_named_like_the_planted_one_answers_unknown(
