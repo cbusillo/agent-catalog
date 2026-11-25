@@ -7,8 +7,12 @@ on:
 
 jobs:
   checks:
+    needs: inspect-python
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require successful macOS inspection
+        run: test "${{ needs.inspect-python.result }}" = success
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --python 3.15
