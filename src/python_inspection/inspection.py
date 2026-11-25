@@ -264,7 +264,7 @@ def copy_project(repository: Path, files: list[str]) -> Path:
         copy_files(repository, [file for file in files if not file.startswith(".venv/")], INSPECTED_PROJECT)
         copy_files(PROOF_SOURCES, planted_files(), INSPECTED_PROJECT / PLANTED_FOLDER)
         set_sql_dialect_if_unset(INSPECTED_PROJECT)
-        exclude_venv_in_plain_project(INSPECTED_PROJECT)
+        exclude_environment_from_inspection(INSPECTED_PROJECT)
         copy_environment(environment, private_env)
     except OSError as error:
         raise InspectionUnknownError(f"Could not copy {repository} and its environment into {INSPECTED_PROJECT}: {error}") from error
@@ -277,9 +277,9 @@ def copy_files(source: Path, files: list[str], destination: Path) -> None:
         shutil.copy2(source / file, destination / file)
 
 
-def write_run_settings(python_version: str) -> tuple[Path, Path]:
+def write_run_settings(version: str) -> tuple[Path, Path]:
     profile, properties = INSPECTOR_HOME / "profile.xml", INSPECTOR_HOME / "idea.properties"
-    profile.write_text(PROFILE_TEMPLATE.read_text().replace("PYTHON_VERSION", python_version))
+    profile.write_text(PROFILE_TEMPLATE.read_text().replace("PYTHON_VERSION", version))
     properties.write_text("".join(f"idea.{kind}.path={INSPECTOR_HOME / kind}\n" for kind in ("config", "system", "plugins", "log")))
     return profile, properties
 
@@ -312,9 +312,9 @@ def set_sql_dialect_if_unset(project: Path) -> None:
         dialects.write_text(POSTGRESQL_DIALECT)
 
 
-def exclude_venv_in_plain_project(project: Path) -> None:
+def exclude_environment_from_inspection(project: Path) -> None:
     modules = project / ".idea" / "modules.xml"
-    if modules.exists() or ((project / "pyproject.toml").is_file() and (project / "uv.lock").is_file()):
+    if modules.exists():
         return
     # On the first inspection PyCharm can scan site-packages before its automatic module excludes .venv.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".iml", dir=modules.parent, delete=False) as module:
