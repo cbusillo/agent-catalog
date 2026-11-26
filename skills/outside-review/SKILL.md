@@ -6,7 +6,7 @@ description: Get a read-only second opinion on a local change when someone asks 
 Use a provider different from the one that wrote the change. Honor a named reviewer and the user's existing provider order, models and signed-in accounts. Check the selected login if a metered API credential might take precedence. When no reviewer is named, Codex can ask Claude and Claude Code can ask Codex. If authorship is unknown, say what independence you can verify. Report an unavailable or non-independent choice to the requester.
 
 1. Identify the local change and the question. Inspect the diff and choose enough surrounding source for a reviewer to challenge the change. Send only material authorized for that provider. Keep secrets, unrelated files, transcripts and account details out. For a historical change, take context from the reviewed revision.
-2. Pipe the Git diff into this skill's `scripts/review` and pass the selected context files as paths relative to your current directory. The launcher gives the reviewer a private temporary directory with those inputs. Context files get a `.txt` suffix so project configuration is read as data. For example, from a checkout of the target revision:
+2. Pipe the Git diff into this skill's `scripts/review` and pass the selected context files as paths relative to your current directory. The launcher gives the reviewer a private temporary directory with those inputs. It uses jq to list the copied context paths in the prompt, so the reviewer can open them directly. Context files get a `.txt` suffix so project configuration is read as data. For example, from a checkout of the target revision:
 
    ```sh
    set -o pipefail
