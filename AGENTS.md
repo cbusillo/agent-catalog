@@ -25,7 +25,7 @@ Rules have names, not numbers. Refer to a rule by its name.
 - **Split.** If Chris cannot tell whether a step worked by watching it, the step is too big or the wrong shape. Split it.
 - **Yours and Chris's.** How to build something is yours to choose. What a piece does, who may use it, and anything that touches a protection is Chris's. When you are unsure which one a question is, ask.
 - **Pull request.** One pull request per step. Merge it yourself once CI is green and Chris has watched the step work. Never push to the main branch directly.
-- **Inspect.** Before a step ends, run this catalog's inspection tool on this repository and fix what it finds. If it cannot give an answer, say so in your report and carry on.
+- **Inspect.** Before a step ends, run this catalog's inspection tool on this repository and fix what it finds. If it returns `UNKNOWN`, report the reason and keep the step open until inspection gives an answer.
 - **Checker.** The checker reads your work after each step and reports to Chris. You do not wait for it and it does not approve you. What it finds reaches you through Chris.
 - **Lines.** With each step, report lines added and removed.
 - **Maintained.** Use a maintained library or client before writing your own. Do not write a protocol, a parser or a client that a maintained one already provides.
