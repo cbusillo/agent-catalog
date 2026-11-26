@@ -27,7 +27,15 @@ Every piece follows the same four rules as Launchplane:
 - **[Outside review](skills/outside-review/SKILL.md)**: ask a different provider to read a local change, then check its findings in the requesting session. First used to weigh an independent review of this catalog's Python inspector.
 - Use **[Start work](skills/start-work/SKILL.md)** to prepare or resume a repository change in the working copy provided by the host's approved procedure. A read-only reviewer can use the checkout it receives.
 
-To add a skill to a project, run the following from that project's root with `catalog` set to the path of this checkout and `skill` set to `outside-review` or `start-work`. Choose the agent you use, or install for both.
+Set `catalog` to this checkout and `skill` to `outside-review` or `start-work`.
+
+For a seat that works across checkouts, set `seat_config` to its configured profile directory (`CLAUDE_CONFIG_DIR` for Claude Code or `CODEX_HOME` for Codex). Check where the profile’s `skills` directory resolves. Every seat sharing that directory gets the installation. In Codex, `skills.include_instructions` controls whether the skill description appears in the prompt.
+
+```sh
+gh skill install "$catalog" "$skill" --from-local --dir "${seat_config:?set the intended profile directory}/skills"
+```
+
+For a single checkout, run the command for your harness from that checkout. A project install writes local files there. A fresh linked checkout only inherits tracked files, and a local skill install records its source path.
 
 ```sh
 gh skill install "$catalog" "$skill" --from-local --scope project --agent codex

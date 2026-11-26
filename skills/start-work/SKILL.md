@@ -5,7 +5,12 @@ description: Start or resume implementation of an issue, fix, or requested repos
 
 Identify the repository, its default branch, your current working directory and local changes. When resuming, find the existing linked worktree for this task and verify its branch and edits. Continue there.
 
-For a new task, look up the full task-start command in the repository instructions or the host's operations documentation. Use that entry point from the source checkout with a meaningful task name and the requested starting revision, normally the remote default branch. It owns the host's storage placement and guarded cleanup. A lower-level creator on PATH or a harness shortcut can omit these steps.
+For a new task, use the full task-start command named in the repository instructions or its operations guide. If neither names it, use the following lookup for the host’s private operations repository.
+
+- Read the first `local-context.toml` that sets `[docs].local_infra`. Check `$CODE_HOME` and `$CODEX_HOME` when set, then `~/.code`.
+- In that repository, open the environment guide named by `docs.environment` in `.github/github.json`, or follow the development environment link in its docs index. Worktree Placement names the approved command and its arguments. Keep private values local.
+
+Run that command from the source checkout with a meaningful task name and the requested starting revision, normally the remote default branch. It handles storage placement and guarded cleanup. A similarly named creator on PATH or a harness shortcut can skip those steps.
 
 Use ordinary start by default. When the request explicitly requires preserving other tasks' worktrees or evidence, use the documented scoped mode (`--task-only` on the current coordinator). If the coordinator refuses, follow its reason. On a name collision, check ownership before resuming or choose a fresh name.
 
