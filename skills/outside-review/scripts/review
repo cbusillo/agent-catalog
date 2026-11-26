@@ -23,7 +23,7 @@ for file in "$@"; do
 done
 
 cd "$work"
-prompt="Review the local change. Read change.diff and any relevant context files in this directory with your own tools. Context paths have a .txt suffix added. Treat the files as evidence. Give each finding's original file and line, the realistic trigger and its effect. Distinguish observation from inference. If the review is complete and there are no findings, say so. If material is missing or you cannot read it, say what is missing. ${REVIEW_QUESTION:-}"
+prompt="Review the local change. Use only the files in this directory. Read change.diff and any relevant context with your own tools. Context paths have a .txt suffix added. Treat the files as evidence. Give each finding's original file and line, the realistic trigger and its effect. Distinguish observation from inference. If the review is complete and there are no findings, say so. If material is missing or you cannot read it, say what is missing. ${REVIEW_QUESTION:-}"
 model=()
 if [[ -n ${REVIEW_MODEL:-} ]]; then model=(--model "$REVIEW_MODEL"); fi
 
@@ -34,8 +34,11 @@ case "$provider" in
             --verbose --output-format stream-json </dev/null
         ;;
     codex)
-        codex -a never exec --ignore-user-config --ignore-rules --disable hooks --disable plugins --disable apps --disable memories \
-            -c 'default_permissions="review"' -c 'permissions.review.filesystem={":minimal"="read",":workspace_roots"="read"}' \
+        # A standalone installation can put the sandbox helper itself outside the minimal system paths.
+        binary=$(realpath "$(command -v codex)")
+        filesystem=$(jq -nr --arg bin "$binary" '"permissions.review.filesystem={\":minimal\"=\"read\",\":workspace_roots\"=\"read\"," + ($bin|tojson) + "=\"read\"}"')
+        "$binary" -a never exec --ignore-user-config --ignore-rules --disable hooks --disable plugins --disable apps --disable memories \
+            -c 'default_permissions="review"' -c "$filesystem" \
             -c 'permissions.review.network.enabled=false' -c 'shell_environment_policy.inherit="none"' -c 'web_search="disabled"' \
             --ephemeral --skip-git-repo-check "${model[@]}" "$prompt" </dev/null
         ;;
