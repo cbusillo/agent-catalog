@@ -31,15 +31,35 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --python 3.15
       - run: command -v shellcheck || brew install shellcheck
-      - name: Inspect a clean Python project with the pinned PyCharm
+      - name: Inspect a declared dependency, then remove its declaration
         env:
           INSPECT_PYTHON_HOME: ${{ runner.temp }}/inspect-python
         run: |
           git init --quiet "$RUNNER_TEMP/clean-project"
           cd "$RUNNER_TEMP/clean-project"
           echo '.venv/' >> .git/info/exclude
-          uv init --bare --python 3.15
-          uv sync
-          printf 'def twice(number: int) -> int:\n    return number + number\n' > example.py
-          git add example.py pyproject.toml uv.lock
+          uv init --bare --lib --build-backend uv --author-from none --name clean-project --python 3.15
+          mkdir -p src/clean_project
+          cat > src/clean_project/__init__.py <<'PY'
+          from docker.errors import DockerException
+
+
+          def is_docker_error(error: Exception) -> bool:
+              return isinstance(error, DockerException)
+          PY
+          uv add docker
+          git add src pyproject.toml uv.lock
           "$GITHUB_WORKSPACE/.venv/bin/inspect-python"
+          cd "$INSPECT_PYTHON_HOME/project"
+          .venv/bin/python -IB -c 'from pathlib import Path; import clean_project; assert Path(clean_project.__file__).resolve().is_relative_to(Path.cwd())'
+          cd "$RUNNER_TEMP/clean-project"
+          mkdir -p .idea
+          cp "$INSPECT_PYTHON_HOME/project/.idea/modules.xml" "$INSPECT_PYTHON_HOME"/project/.idea/*.iml .idea/
+          git add --force .idea/modules.xml .idea/*.iml
+          uv remove --no-sync docker
+          .venv/bin/python -IB -c 'from docker.errors import DockerException'
+          status=0
+          "$GITHUB_WORKSPACE/.venv/bin/inspect-python" > "$RUNNER_TEMP/undeclared.log" || status=$?
+          cat "$RUNNER_TEMP/undeclared.log"
+          test "$status" = 1
+          grep -Eq '^src/clean_project/__init__\.py:1: .*\[PyPackageRequirementsInspection\]$' "$RUNNER_TEMP/undeclared.log"

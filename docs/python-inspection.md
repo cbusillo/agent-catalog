@@ -2,10 +2,10 @@
 
 `inspect-python` runs PyCharm's command-line inspector on the repository in the current folder. It prints `clean`, the findings, or `UNKNOWN` with the reason. Exit codes: 0 clean, 1 findings, 2 unknown.
 
-A repository calls it pinned to a release:
+Set `CATALOG_COMMIT` to the full catalog commit qualified for the repository, then run:
 
 ```sh
-uvx --from git+https://github.com/<owner>/agent-catalog@v0.1.0 inspect-python
+uvx --from "git+https://github.com/cbusillo/agent-catalog@${CATALOG_COMMIT:?set the catalog commit}" inspect-python
 ```
 
 ## Settings
@@ -14,25 +14,27 @@ uvx --from git+https://github.com/<owner>/agent-catalog@v0.1.0 inspect-python
 - Set `INSPECT_PYTHON_PYCHARM` to test a specific application. This leaves the managed IDEs in place.
 - `INSPECT_PYTHON_HOME`: the folder PyCharm uses as its home while inspecting. Default `~/.cache/inspect-python`. It must not be inside the repository or contain it; the tool refuses with `UNKNOWN`.
 
-The repository must have its interpreter at `.venv/bin/python`, as `uv sync` leaves it.
+The repository must have its interpreter at `.venv/bin/python`, as `uv sync` leaves it. The inspection home needs space for a copy of this environment.
 
-Renovate checks JetBrains' stable builds weekly. On a pull request, a GitHub-hosted Mac runs the proposed build through `inspect-python` on a clean Python project. A missed planted mistake fails that check.
+Renovate checks JetBrains' stable builds weekly. On a pull request, a GitHub-hosted Mac inspects a project with a declared dependency, then removes the declaration and checks that the same import produces a dependency warning while the package is still installed.
 
 ## What a run does
 
 - When the home has no `plugins` folder, it downloads the adopted plugins from the JetBrains Marketplace at their pinned versions and unpacks them there. The folder appears only once every plugin is unpacked. To reinstall the plugin files, remove only `plugins` from the inspection home.
-- It copies the files `git ls-files -z --cached --others --exclude-standard` lists into `project` in the home, and the planted mistakes from `src/python_inspection/proofs` into `inspect-python-planted-mistakes` inside that copy. A repository that has a folder of that name answers `UNKNOWN`. Neither the tool nor PyCharm writes into the repository. A repository's own `.idea/misc.xml` and `.idea/sqldialects.xml` are used when the repository tracks them. Otherwise the copy gets an interpreter name and the PostgreSQL SQL dialect.
-- PyCharm inspects the copy in one launch. Each adopted plugin and built-in check must report its planted mistake at the exact file, line and inspection inside the planted folder, or the answer is `UNKNOWN` naming it. Nothing is remembered between runs: a plugin that is missing or disabled fails its proof on the next run, and on every run after.
-- Every copied file must appear in PyCharm's log as analysed, and PyCharm's results index must list the inspections it ran. A finding at any other path makes the answer `UNKNOWN`. Findings in the planted folder, and in this catalog's own proofs, are never shown as the repository's.
+- It copies tracked and unignored project files into `project` in the home, alongside the planted mistakes in `inspect-python-planted-mistakes`. A repository with a folder of that name answers `UNKNOWN`. The tool copies the existing virtual environment separately. If Git tracks a file inside `.venv/`, the command names the conflict and returns `UNKNOWN` before launching PyCharm. For a locked uv project, PyCharm discovers the private environment through its native uv integration. For a plain Python project the tool passes the private interpreter through `PYCHARM_PYTHON_PATH`. The source checkout and environment stay untouched.
+- If a package is installed in editable mode from the repository, uv reinstalls it offline from its private copy without changing dependencies. A build that requires missing Git history or an uncached backend returns `UNKNOWN` with uv’s error. PyCharm imports a uv project from its own metadata. A plain directory without module settings gets a private Python module so its interpreter is ready on first inspection. The inspection scope excludes the private `.venv` from source analysis.
+- For a locked uv project, PyCharm's native warmup opens the private copy first. The inspector checks that PyCharm registered its private uv environment before starting analysis. Otherwise a source file can be checked before its interpreter is ready, or a generic Python SDK can miss an undeclared dependency.
+- PyCharm inspects the source and planted mistakes together in one launch. Each adopted plugin and built-in check must report its planted mistake at the exact file, line and inspection inside the planted folder, or the answer is `UNKNOWN` naming it. A plugin that is missing or disabled fails its proof on the next run.
+- The tool copies and lists shared module descriptors (`.iml`, including in nested modules), JetBrains component XML under `.idea`, and the store's `.gitignore` as project settings. PyCharm uses `modules.xml` to select the modules. Any findings it emits on supplied settings are included. A copy without SQL dialect settings gets PostgreSQL.
+- Every other Git-listed project file and every planted proof file must appear in PyCharm's analysis log, and its results index must list the inspections it ran. A missed source file or a finding outside the supplied inputs makes the answer `UNKNOWN`. Findings in the planted folder and the catalog's own proofs are omitted from repository findings.
 - It prints what it is doing on stderr. PyCharm gets no input, and a launch that takes longer than 15 minutes answers `UNKNOWN`, so a run never needs a wrapper to stop it.
 
 ## How PyCharm behaves headless
 
-Measured on PyCharm 2026.3, build PY-263.7307.206:
+The original headless measurements used PyCharm build PY-263.7307.206. The tracked-module and dependency checks also ran on the pinned 2026.3.1 release candidate.
 
 - It opens an untrusted project in safe mode and then ignores its interpreter, so type checks go silent while a run still looks clean. The tool writes trust for the project it inspects into the home before every launch.
-- A fresh home never sets up an interpreter by itself. The tool registers the repository's interpreter, with its library roots, under the name each project's `misc.xml` names.
-- Caches in the home's `system` folder can keep a project broken after its interpreter is fixed. The tool clears them before every run.
+- Cached interpreter records and indexes can survive a change of project in the inspection home. Each run clears them before opening the new private copy.
 - A plugin can make the inspector analyse nothing and still exit successfully. The check that every file was analysed, and the proofs, are what reveal it.
 - The standard-library proof calls a method `pathlib.Path` does not have. PyCharm can report that call only when it resolves the standard library. An unresolved import is reported on a different line and does not count.
 - ShellCheck runs only when the `shellcheck` program is on the PATH. Without it, its proof fails.
@@ -46,6 +48,4 @@ Measured on PyCharm 2026.3, build PY-263.7307.206:
 - **A separately installed copy shows this catalog's planted files as findings.** Findings in this checkout's `src/python_inspection/proofs` are dropped only when the running package is that same checkout. Inspecting the catalog through another installed copy reports them. Comes back when the catalog is inspected that way for real work.
 - **A repository can weaken the standard-library proof.** A repository file named like a standard-library module could resolve the canary's import in its place. This is inference, not seen. Comes back if a repository with such a file answers `clean` while the canary passes.
 - **Duplicate analysis can report repository code that matches planted code.** The planted duplicate files sit in the same project as the repository, so a repository file that matches them could be reported as a duplicate. This is inference, not seen. Comes back if such a finding appears.
-- **Five changes leave the unit tests passing:** matching a proof without its inspection ID, removing the BetterPy proof, disconnecting the file-coverage check, skipping project trust, and exiting 1 on a clean answer. Comes back when one of them is made by mistake, or when the tests are next reworked.
-- **A link at the home's `project` folder can redirect the copy.** If something places a symbolic link at `project` in the home that points into the repository, the tool's removal of `project` skips the link silently and the copy is written through it into the repository. The tool does not check for it, because only someone with write access to the home can place it. Comes back if a link is ever found there, or if the home is shared.
 - **A results index holding a null group gives a traceback.** PyCharm has not been seen writing one, so the run fails loudly rather than answering `clean`. Comes back if PyCharm is ever seen writing one.
