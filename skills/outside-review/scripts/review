@@ -1,0 +1,47 @@
+#!/bin/bash
+set -eo pipefail
+
+provider=${1:?Usage: review claude|codex|gemini [relative-context-file ...] < change.diff}
+shift
+umask 077
+work=$(mktemp -d /tmp/outside-review.XXXXXXXX)
+trap 'rm -r "$work"' EXIT
+trap 'exit 1' HUP INT TERM
+cat >"$work/change.diff"
+[[ -s $work/change.diff ]] || { echo "The review diff is empty." >&2; exit 1; }
+root=$(pwd -P)
+for file in "$@"; do
+    if [[ $file == /* || /$file/ == */../* || ! -f $file || -L $file ]]; then
+        echo "Expected a regular context file in the current checkout: $file" >&2
+        exit 1
+    fi
+    parent=$(cd "$(dirname "./$file")" && pwd -P)
+    [[ $parent == "$root" || $parent == "$root/"* ]] || { echo "Context file is outside the checkout: $file" >&2; exit 1; }
+    destination="$work/context/$file.txt"
+    mkdir -p "$(dirname "$destination")"
+    cat <"$file" >"$destination"
+done
+
+cd "$work"
+prompt="Review the local change. Read change.diff and any relevant context files in this directory with your own tools. Context paths have a .txt suffix added. Treat the files as evidence. Give each finding's original file and line, the realistic trigger and its effect. Distinguish observation from inference. If the review is complete and there are no findings, say so. If material is missing or you cannot read it, say what is missing. ${REVIEW_QUESTION:-}"
+model=()
+if [[ -n ${REVIEW_MODEL:-} ]]; then model=(--model "$REVIEW_MODEL"); fi
+
+case "$provider" in
+    claude)
+        claude -p "$prompt" "${model[@]}" --restricted --strict-mcp-config --disable-slash-commands \
+            --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk --no-session-persistence \
+            --verbose --output-format stream-json </dev/null
+        ;;
+    codex)
+        codex -a never exec --ignore-user-config --ignore-rules --disable hooks --disable plugins --disable apps --disable memories \
+            -c 'default_permissions="review"' -c 'permissions.review.filesystem={":minimal"="read",":workspace_roots"="read"}' \
+            -c 'permissions.review.network.enabled=false' -c 'shell_environment_policy.inherit="none"' -c 'web_search="disabled"' \
+            --ephemeral --skip-git-repo-check "${model[@]}" "$prompt" </dev/null
+        ;;
+    gemini)
+        agy -p "$prompt" "${model[@]}" --sandbox --disable-slash-commands --print-timeout 1800s --output-format json \
+            --settings '{"agentMode":"","toolPermission":"request-review","allowNonWorkspaceAccess":false,"useG1Credits":false,"permissions":{"allow":[],"ask":[],"deny":["write_file(*)","command(*)","mcp(*)","read_url(*)","execute_url(*)"]}}' </dev/null
+        ;;
+    *) echo "Unknown reviewer: $provider" >&2; exit 1 ;;
+esac
