@@ -390,12 +390,12 @@ def require_selected_uv_sdk(project: Path) -> None:
     try:
         table = ElementTree.parse(INSPECTOR_OPTIONS / "jdk.table.xml")  # noqa: S314 written by PyCharm in its private home
         settings = ElementTree.parse(project / ".idea/misc.xml")  # noqa: S314 read from the private project
-    except (OSError, ElementTree.ParseError) as error:
+    except (OSError, ElementTree.ParseError, LookupError) as error:
         raise InspectionUnknownError(f"Could not read PyCharm's interpreter settings after warmup: {error}") from error
-    manager = settings.find("component[@name='ProjectRootManager']")
+    manager = settings.find("component[@name='ProjectRootManager'][@project-jdk-type='Python SDK']")
     selected = manager.get("project-jdk-name", "") if manager is not None else ""
     if not selected:
-        raise InspectionUnknownError(f"PyCharm finished warmup without selecting a project interpreter for {project}.")
+        raise InspectionUnknownError(f"PyCharm finished warmup without selecting a Python SDK for {project}.")
     selected = expand_ide_path(selected, project)
     for sdk in table.iterfind("component[@name='ProjectJdkTable']/jdk"):
         name = sdk.find("name")

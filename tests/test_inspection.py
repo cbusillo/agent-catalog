@@ -451,17 +451,25 @@ def test_warmup_requires_the_project_to_select_the_registered_uv_sdk(tmp_path: P
     monkeypatch.setattr(inspection, "run_quietly", Mock(return_value=subprocess.CompletedProcess([], 0)))
     environment = tmp_path / ".venv"
     (tmp_path / "jdk.table.xml").write_text(
-        f'<application><component name="ProjectJdkTable"><jdk><name value="{environment}"/>'
+        f'<application><component name="ProjectJdkTable"><jdk><name value="{environment}"/><type value="Python SDK"/>'
         '<additional IS_UV="true" UV_VENV_PATH="$PROJECT_DIR$/.venv"/></jdk></component></application>'
     )
     settings = tmp_path / ".idea/misc.xml"
     settings.parent.mkdir()
-    for selection in ("", 'project-jdk-name="another interpreter"'):
+    for selection in (
+        'project-jdk-type="Python SDK"',
+        'project-jdk-name="$PROJECT_DIR$/.venv"',
+        'project-jdk-type="JavaSDK" project-jdk-name="$PROJECT_DIR$/.venv"',
+        'project-jdk-type="Python SDK" project-jdk-name="another interpreter"',
+    ):
         settings.write_text(f'<project><component name="ProjectRootManager" {selection}/></project>')
         with pytest.raises(InspectionUnknownError):
             inspection.warm_uv_project(tmp_path, {}, 0)
 
-    settings.write_text('<project><component name="ProjectRootManager" project-jdk-name="$PROJECT_DIR$/.venv"/></project>')
+    settings.write_text(
+        '<project><component name="ProjectRootManager" project-jdk-type="Python SDK" '
+        'project-jdk-name="$PROJECT_DIR$/.venv"/></project>'
+    )
     inspection.warm_uv_project(tmp_path, {}, 0)
 
 
