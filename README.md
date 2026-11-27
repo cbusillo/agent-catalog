@@ -26,8 +26,9 @@ Every piece follows the same four rules as Launchplane:
 - **Python inspection** (`inspect-python`): runs PyCharm's inspector on a repository and answers `clean`, the findings, or `UNKNOWN`. It proves each of its checks on planted mistakes before it may say `clean`. First used by `launchplane-next`. See [docs/python-inspection.md](docs/python-inspection.md).
 - **[Outside review](skills/outside-review/SKILL.md)**: ask a different provider to read a local change, then check its findings in the requesting session. First used to weigh an independent review of this catalog's Python inspector.
 - Use **[Start work](skills/start-work/SKILL.md)** to prepare or resume a repository change in the working copy provided by the host's approved procedure. A read-only reviewer can use the checkout it receives.
+- **[Harness test](skills/harness-test/SKILL.md)** compares fresh sessions with a control. First used to test the catalog builder’s publishing handoff.
 
-Set `catalog` to this checkout and `skill` to `outside-review` or `start-work`.
+Set `catalog` to this checkout and `skill` to the selected skill directory name.
 
 For a seat that works across checkouts, set `seat_config` to its configured profile directory (`CLAUDE_CONFIG_DIR` for Claude Code or `CODEX_HOME` for Codex). Check where the profile’s `skills` directory resolves. Every seat sharing that directory gets the installation. In Codex, `skills.include_instructions` controls whether the skill description appears in the prompt.
 
