@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 import sys
 import sysconfig
 import venv
@@ -7,6 +8,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -442,6 +444,35 @@ def test_a_repository_without_an_interpreter_answers_unknown(tmp_path: Path, mon
     monkeypatch.chdir(repository)
 
     answer_unknown()
+
+
+def test_warmup_requires_the_project_to_select_the_registered_uv_sdk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(inspection, "INSPECTOR_OPTIONS", tmp_path)
+    monkeypatch.setattr(inspection, "run_quietly", Mock(return_value=subprocess.CompletedProcess([], 0)))
+    home_alias = tmp_path / "home-link"
+    home_alias.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", Mock(return_value=home_alias))
+    (tmp_path / "jdk.table.xml").write_text(
+        '<application><component name="ProjectJdkTable"><jdk><name value="$USER_HOME$/.venv"/><type value="Python SDK"/>'
+        '<additional IS_UV="true" UV_VENV_PATH="$USER_HOME$/.venv"/></jdk></component></application>'
+    )
+    settings = tmp_path / ".idea/misc.xml"
+    settings.parent.mkdir()
+    for selection in (
+        'project-jdk-type="Python SDK"',
+        'project-jdk-name="$PROJECT_DIR$/.venv"',
+        'project-jdk-type="JavaSDK" project-jdk-name="$PROJECT_DIR$/.venv"',
+        'project-jdk-type="Python SDK" project-jdk-name="another interpreter"',
+    ):
+        settings.write_text(f'<project><component name="ProjectRootManager" {selection}/></project>')
+        with pytest.raises(InspectionUnknownError):
+            inspection.warm_uv_project(tmp_path, {}, 0)
+
+    settings.write_text(
+        '<project><component name="ProjectRootManager" project-jdk-type="Python SDK" '
+        'project-jdk-name="$PROJECT_DIR$/.venv"/></project>'
+    )
+    inspection.warm_uv_project(tmp_path, {}, 0)
 
 
 def test_caches_that_cannot_be_cleared_answer_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

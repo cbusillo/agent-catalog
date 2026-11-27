@@ -379,15 +379,33 @@ def warm_uv_project(project: Path, settings: dict[str, str], lock_fd: int) -> No
     if result.returncode:
         detail = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
         raise InspectionUnknownError(f"PyCharm could not initialize the private uv project (exit {result.returncode}):\n{detail}")
+    require_selected_uv_sdk(project)
+
+
+def expand_ide_path(value: str, project: Path) -> str:
+    return value.replace("$USER_HOME$", str(Path.home().resolve())).replace("$PROJECT_DIR$", str(project))
+
+
+def require_selected_uv_sdk(project: Path) -> None:
     try:
         table = ElementTree.parse(INSPECTOR_OPTIONS / "jdk.table.xml")  # noqa: S314 written by PyCharm in its private home
-        for sdk in table.iterfind(".//jdk/additional[@IS_UV='true']"):
-            location = sdk.get("UV_VENV_PATH", "").replace("$USER_HOME$", str(Path.home())).replace("$PROJECT_DIR$", str(project))
-            if Path(location) == project / ".venv":
-                return
-    except (OSError, ElementTree.ParseError) as error:
-        raise InspectionUnknownError(f"Could not read PyCharm's uv interpreter after warmup: {error}") from error
-    raise InspectionUnknownError(f"PyCharm finished warmup without registering {project / '.venv'} as a uv environment.")
+        settings = ElementTree.parse(project / ".idea/misc.xml")  # noqa: S314 read from the private project
+    except (OSError, ElementTree.ParseError, LookupError) as error:
+        raise InspectionUnknownError(f"Could not read PyCharm's interpreter settings after warmup: {error}") from error
+    manager = settings.find("component[@name='ProjectRootManager'][@project-jdk-type='Python SDK']")
+    selected = manager.get("project-jdk-name", "") if manager is not None else ""
+    if not selected:
+        raise InspectionUnknownError(f"PyCharm finished warmup without selecting a Python SDK for {project}.")
+    selected = expand_ide_path(selected, project)
+    for sdk in table.iterfind("component[@name='ProjectJdkTable']/jdk"):
+        name = sdk.find("name")
+        uv = sdk.find("additional[@IS_UV='true']")
+        if name is None or uv is None:
+            continue
+        environment = Path(expand_ide_path(uv.get("UV_VENV_PATH", ""), project))
+        if environment == project / ".venv" and expand_ide_path(name.get("value", ""), project) == selected:
+            return
+    raise InspectionUnknownError(f"The project selected {selected!r}, which is not a registered uv SDK for {project / '.venv'}.")
 
 
 def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Finding]:
