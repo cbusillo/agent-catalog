@@ -449,10 +449,12 @@ def test_a_repository_without_an_interpreter_answers_unknown(tmp_path: Path, mon
 def test_warmup_requires_the_project_to_select_the_registered_uv_sdk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inspection, "INSPECTOR_OPTIONS", tmp_path)
     monkeypatch.setattr(inspection, "run_quietly", Mock(return_value=subprocess.CompletedProcess([], 0)))
-    environment = tmp_path / ".venv"
+    home_alias = tmp_path / "home-link"
+    home_alias.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", Mock(return_value=home_alias))
     (tmp_path / "jdk.table.xml").write_text(
-        f'<application><component name="ProjectJdkTable"><jdk><name value="{environment}"/><type value="Python SDK"/>'
-        '<additional IS_UV="true" UV_VENV_PATH="$PROJECT_DIR$/.venv"/></jdk></component></application>'
+        '<application><component name="ProjectJdkTable"><jdk><name value="$USER_HOME$/.venv"/><type value="Python SDK"/>'
+        '<additional IS_UV="true" UV_VENV_PATH="$USER_HOME$/.venv"/></jdk></component></application>'
     )
     settings = tmp_path / ".idea/misc.xml"
     settings.parent.mkdir()

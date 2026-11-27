@@ -383,7 +383,7 @@ def warm_uv_project(project: Path, settings: dict[str, str], lock_fd: int) -> No
 
 
 def expand_ide_path(value: str, project: Path) -> str:
-    return value.replace("$USER_HOME$", str(Path.home())).replace("$PROJECT_DIR$", str(project))
+    return value.replace("$USER_HOME$", str(Path.home().resolve())).replace("$PROJECT_DIR$", str(project))
 
 
 def require_selected_uv_sdk(project: Path) -> None:
