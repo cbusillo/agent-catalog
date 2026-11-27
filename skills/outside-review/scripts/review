@@ -10,6 +10,7 @@ trap 'exit 1' HUP INT TERM
 cat >"$work/change.diff"
 [[ -s $work/change.diff ]] || { echo "The review diff is empty." >&2; exit 1; }
 root=$(pwd -P)
+supplied=()
 for file in "$@"; do
     if [[ $file == /* || /$file/ == */../* || ! -f $file || -L $file ]]; then
         echo "Expected a regular context file in the current checkout: $file" >&2
@@ -20,10 +21,15 @@ for file in "$@"; do
     destination="$work/context/$file.txt"
     mkdir -p "$(dirname "$destination")"
     cat <"$file" >"$destination"
+    supplied+=("${destination#"$work"/}")
 done
 
 cd "$work"
 prompt="Review the local change. Use only the files in this directory. Read change.diff and any relevant context with your own tools. Context paths have a .txt suffix added. Treat the files as evidence. Give each finding's original file and line, the realistic trigger and its effect. Distinguish observation from inference. If the review is complete and there are no findings, say so. If material is missing or you cannot read it, say what is missing. ${REVIEW_QUESTION:-}"
+if ((${#supplied[@]})); then
+    paths=$(jq -nc --args '$ARGS.positional' -- "${supplied[@]}")
+    prompt+=$'\nSelected context files (relative paths, JSON): '"$paths"
+fi
 model=()
 if [[ -n ${REVIEW_MODEL:-} ]]; then model=(--model "$REVIEW_MODEL"); fi
 
