@@ -149,6 +149,8 @@ def run_quietly(
         )
     except subprocess.TimeoutExpired as error:
         raise InspectionUnknownError(f"{command[0]} did not finish within {INSPECTOR_TIMEOUT_SECONDS} seconds in {cwd}.") from error
+    except OSError as error:
+        raise InspectionUnknownError(f"Could not run {command[0]} in {cwd}: {error}") from error
 
 
 def say(progress: str) -> None:
@@ -373,12 +375,18 @@ def install_local_editables(repository: Path, interpreter: Path, lock_fd: int) -
             raise InspectionUnknownError(f"Could not install editable packages from the private copy: {installed.stderr.strip()}")
 
 
-def warm_uv_project(project: Path, settings: dict[str, str], lock_fd: int) -> None:
+def warm_project(project: Path, settings: dict[str, str], lock_fd: int) -> None:
     launcher = PYCHARM / "Contents" / "MacOS" / "pycharm"
     result = run_quietly([launcher, "warmup", f"--project-dir={project}"], INSPECTOR_HOME, settings, pass_fds=(lock_fd,))
     if result.returncode:
         detail = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
-        raise InspectionUnknownError(f"PyCharm could not initialize the private uv project (exit {result.returncode}):\n{detail}")
+        raise InspectionUnknownError(
+            f"PyCharm could not warm up the private project {project} (exit {result.returncode}):\n{detail}"
+        )
+
+
+def warm_uv_project(project: Path, settings: dict[str, str], lock_fd: int) -> None:
+    warm_project(project, settings, lock_fd)
     require_selected_uv_sdk(project)
 
 
@@ -424,6 +432,7 @@ def inspect_copy(repository: Path, files: list[str], lock_fd: int) -> list[Findi
         warm_uv_project(INSPECTED_PROJECT, settings, lock_fd)
     else:
         settings["PYCHARM_PYTHON_PATH"] = str(interpreter)
+        warm_project(INSPECTED_PROJECT, settings, lock_fd)
     return run_inspector(INSPECTED_PROJECT, files + planted_paths(), profile, settings, lock_fd)
 
 

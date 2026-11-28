@@ -106,6 +106,10 @@ def install_fake_pycharm(home: Path, monkeypatch: pytest.MonkeyPatch, seconds: i
     )
     (pycharm / "bin" / "inspect.sh").write_text(script)
     (pycharm / "bin" / "inspect.sh").chmod(0o755)
+    (pycharm / "MacOS").mkdir()
+    launcher = pycharm / "MacOS" / "pycharm"
+    launcher.write_text("#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o755)
     set_reports(home, planted_reports())
     (inspector_home / "plugins" / MAPPER_GUARD).mkdir(parents=True)
     paths = {
@@ -215,6 +219,18 @@ def test_one_launch_inspects_the_repository_and_the_planted_mistakes(tmp_path: P
     assert inspection.inspect_repository(repository) == []
     assert inspection.inspect_repository(repository) == []
     assert calls.read_text().split() == ["project", "project"]
+
+
+def test_failed_plain_project_warmup_preserves_unknown_before_analysis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = install_fake_pycharm(tmp_path, monkeypatch)
+    launcher = inspection.PYCHARM / "Contents" / "MacOS" / "pycharm"
+    launcher.write_text('#!/bin/sh\necho "unavailable: $PYCHARM_PYTHON_PATH" >&2\nexit 1\n')
+    monkeypatch.chdir(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
+
+    assert str(inspection.INSPECTED_PROJECT / ".venv" / "bin" / "python") in answer_unknown()
+    launcher.unlink()
+    assert str(launcher) in answer_unknown()
+    assert not calls.exists()
 
 
 def test_a_removed_plugin_answers_unknown_naming_its_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
