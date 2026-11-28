@@ -1,0 +1,71 @@
+#!/bin/bash
+set -eo pipefail
+umask 077
+unset CDPATH
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+[[ $# == 4 ]] || fail 'Usage: compare claude|codex CONTROL_DIR CANDIDATE_DIR EVIDENCE_PARENT < task.txt'
+[[ -n $2 && -n $3 && -n $4 ]] || fail 'Supply both case directories and an existing evidence parent.'
+case $1 in
+    claude) model=${HARNESS_TEST_MODEL:-claude-haiku-5-5} ;;
+    codex) model=${HARNESS_TEST_MODEL:-gpt-6-luna} ;;
+    *) fail 'Choose claude or codex.' ;;
+esac
+provider=$1
+effort=${HARNESS_TEST_EFFORT:-low}
+seconds=${HARNESS_TEST_TIMEOUT_SECONDS:-300}
+[[ $seconds =~ ^[1-9][0-9]*$ ]] || fail 'HARNESS_TEST_TIMEOUT_SECONDS must be a positive whole number.'
+control=$(cd -- "$2" && pwd -P)
+candidate=$(cd -- "$3" && pwd -P)
+parent=$(cd -- "$4" && pwd -P)
+[[ $control != / && $candidate != / ]] || fail 'Use dedicated case directories.'
+[[ "$control/" != "$candidate/"* && "$candidate/" != "$control/"* ]] || fail 'Use two separate, non-nested case directories.'
+[[ "$parent/" != "$control/"* && "$parent/" != "$candidate/"* ]] || fail 'Keep the evidence outside both cases.'
+command -v "$provider" >/dev/null || fail "Install $provider before running the comparison."
+command -v timeout >/dev/null || fail 'Install the timeout utility before running the comparison.'
+command -v jq >/dev/null || fail 'Install jq before running the comparison.'
+output=$(mktemp -d "$parent/harness-test.XXXXXX")
+printf 'Evidence: %s\n' "$output"
+cat > "$output/task.txt"
+jq -eRs 'test("\\S")' "$output/task.txt" >/dev/null || fail 'Supply a nonblank task on stdin.'
+printf 'harness=%s\nrequested_model=%s\nrequested_effort=%s\ntimeout_seconds=%s\n' "$provider" "$model" "$effort" "$seconds" > "$output/request.txt"
+timeout -k 5 "$seconds" "$provider" --version >> "$output/request.txt" || fail "Could not read the $provider version; see $output."
+
+run_arm() {
+    local status=0
+    timeout -k 5 "$seconds" "$@" < "$output/task.txt" 2> "$output/$arm.stderr" || status=$?
+    printf '%s\n' "$status" > "$output/$arm.exit"
+    case $status in
+        0) return 0 ;;
+        124) fail "$arm $provider run timed out after ${seconds}s; see $output." ;;
+        *) fail "$arm $provider run stopped with status $status; see $output." ;;
+    esac
+}
+
+for arm in control candidate; do
+    directory=$control
+    [[ $arm == control ]] || directory=$candidate
+    cd -- "$directory"
+    printf '%s\n' "$directory" > "$output/$arm.cwd"
+    if [[ $provider == claude ]]; then
+        run_arm env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude -p --model "$model" --effort "$effort" \
+            --restricted --strict-mcp-config --tools Read,Glob,Grep --allowedTools Read Glob Grep --permission-mode dontAsk \
+            --no-session-persistence --output-format json > "$output/$arm.json"
+        jq -e --arg model "$model" '(.modelUsage | keys) == [$model]' "$output/$arm.json" >/dev/null ||
+            fail "$arm Claude model usage did not confirm the requested ID $model; see $output/$arm.json."
+        jq -er 'select(.is_error == false) | .result | strings | select(test("\\S"))' "$output/$arm.json" > "$output/$arm.txt" ||
+            fail "$arm Claude run returned no successful answer; see $output."
+    else
+        binary=$(realpath "$(command -v codex)")
+        filesystem=$(jq -nr --arg bin "$binary" '"permissions.trial.filesystem={\":minimal\"=\"read\",\":workspace_roots\"=\"read\"," + ($bin|tojson) + "=\"read\"}"')
+        run_arm env -u OPENAI_API_KEY -u CODEX_API_KEY "$binary" -a never exec --ignore-user-config --ignore-rules \
+            --disable hooks --disable plugins --disable apps --disable memories -c 'web_search="disabled"' \
+            -c 'default_permissions="trial"' -c "$filesystem" -c 'permissions.trial.network.enabled=false' \
+            -c 'shell_environment_policy.inherit="none"' -c 'shell_environment_policy.set={PATH="/usr/bin:/bin"}' -m "$model" -c "model_reasoning_effort=$effort" \
+            --ephemeral --skip-git-repo-check --json -o "$output/$arm.txt" - > "$output/$arm.jsonl"
+        jq -se 'any(.[]; .type == "turn.completed") and all(.[]; .type != "turn.failed")' "$output/$arm.jsonl" >/dev/null ||
+            fail "$arm Codex run has no completed turn or reports a failure; see $output."
+        jq -eRs 'test("\\S")' "$output/$arm.txt" >/dev/null ||
+            fail "$arm Codex run returned no answer; see $output."
+    fi
+done
