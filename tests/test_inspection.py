@@ -224,10 +224,17 @@ def test_one_launch_inspects_the_repository_and_the_planted_mistakes(tmp_path: P
 def test_failed_plain_project_warmup_preserves_unknown_before_analysis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = install_fake_pycharm(tmp_path, monkeypatch)
     launcher = inspection.PYCHARM / "Contents" / "MacOS" / "pycharm"
-    launcher.write_text('#!/bin/sh\necho "unavailable: $PYCHARM_PYTHON_PATH" >&2\nexit 1\n')
+    launcher.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" "$PYCHARM_PYTHON_PATH" >&2\n'
+        'if [ -f "$PYCHARM_PROPERTIES" ]; then dirname "$PYCHARM_PROPERTIES" >&2; fi\nexit 1\n'
+    )
     monkeypatch.chdir(make_repository(tmp_path / "repo", {"app.py": "x = 1\n"}))
 
-    assert str(inspection.INSPECTED_PROJECT / ".venv" / "bin" / "python") in answer_unknown()
+    details = answer_unknown().splitlines()
+    assert "warmup" in details
+    assert f"--project-dir={inspection.INSPECTED_PROJECT}" in details
+    assert str(inspection.INSPECTOR_HOME) in details
+    assert str(inspection.INSPECTED_PROJECT / ".venv" / "bin" / "python") in details
     launcher.unlink()
     assert str(launcher) in answer_unknown()
     assert not calls.exists()
